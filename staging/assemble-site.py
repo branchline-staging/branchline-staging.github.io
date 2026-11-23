@@ -37,6 +37,9 @@ for item in dest.rglob("*"):
  for project_id in ("psoopubvdpwztzkdyifa","agknxlowackphvwyvxge","vmyoxoiygfcecgkbavgg","tzklsscoiwnmeantcefw"):revised=revised.replace(project_id,stage)
  if revised!=body:item.write_text(revised)
 assert "branchline-staging.github.io/first-megasaver-ptg/studios/" in (dest/"branchline-applications.js").read_text()
+# Both staging apps use the same Auth project. Keep the registered OAuth
+# client intact, and serve a local fallback instead of a self-issued consent flow.
+shutil.copy2(root/"staging/oauth-consent.html",dest/"oauth-consent.html")
 ptg=parent/"first-megasaver-ptg"/"out"
 assert (ptg/"studios/index.html").exists()
 shutil.copytree(ptg,out/"first-megasaver-ptg")
