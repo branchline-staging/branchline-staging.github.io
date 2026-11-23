@@ -140,7 +140,7 @@ try{
   console.log("DEMO PRE SEARCH", (await page.locator("body").innerText()).slice(0,700));
   await page.locator(".legacy-search-form button[type='submit']").click();
   await page.locator(".legacy-search-results-table tbody tr").filter({hasText:"DEMO-0006"}).first().waitFor();
-  const row=page.locator(".legacy-search-results-table tbody tr").filter({hasText:"DEMO-RC18"}).first();
+  const row=page.locator(".legacy-search-results-table tbody tr").filter({hasText:"DEMO-0006"}).first();
   await row.getByRole("checkbox").check();
   await page.locator(".ptg-print-preview .legacy-print-sheet").first().waitFor({state:"attached"});
   assert.match(await page.locator(".ptg-print-preview").innerText(),/DEMO-RC18|DEMO-0006/);
