@@ -54,6 +54,12 @@ for app,legacy in (("megaframe-studio","vmyoxoiygfcecgkbavgg"),("flyer-studio","
  assert key in s
  assert not re.search(r'<canvas|PRIVATE (MEGAFRAME )?EDITOR BUNDLE|id="photosInput"|id="quickSaveProject"',s,re.I)
  p.write_text(s)
+ # An expired or denied Studio ticket must return to the STAGING PTG portal,
+ # never send a reviewer to production sign-in.
+ for javascript in target.glob("*.js"):
+  original=javascript.read_text()
+  adjusted=original.replace("https://kzamora19.github.io/first-megasaver-ptg/studios/","https://branchline-staging.github.io/first-megasaver-ptg/studios/")
+  if adjusted!=original:javascript.write_text(adjusted)
 forbidden=["psoopubvdpwztzkdyifa","agknxlowackphvwyvxge","vmyoxoiygfcecgkbavgg","tzklsscoiwnmeantcefw","https://kzamora19.github.io","https://first-megasaver-ptg.vercel.app"]
 n=0
 for p in out.rglob("*"):
