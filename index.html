@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src https://rlfdvmiqkbitetatxkju.supabase.co; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<title>Branchline staging sign-in</title>
+<style>
+body{font:16px system-ui;background:#eef2ff;color:#1d2836;margin:0;padding:32px 20px}
+main{max-width:540px;margin:0 auto;background:white;padding:28px;border-radius:14px}
+form,label{display:grid;gap:8px}form{gap:14px}input,button{font:inherit;padding:10px}
+button{border:0;border-radius:6px;background:#2348c7;color:white;cursor:pointer}button:disabled{opacity:.55}
+#studios{display:flex;gap:10px;flex-wrap:wrap}[hidden]{display:none!important}
+</style>
+<main>
+<h1>Branchline staging sign-in</h1>
+<p>Use a dedicated staging PTG account. Keep your live PTG credentials out of this preview.</p>
+<form id="login" method="post">
+<label>Branch code<input name="branchCode" autocomplete="off" maxlength="120"></label>
+<label>Username<input name="username" autocomplete="username" required maxlength="120"></label>
+<label>Password<input type="password" name="password" autocomplete="off" required maxlength="1024"></label>
+<button>Sign in to staging</button>
+</form>
+<p id="status" role="status"></p>
+<div id="studios" hidden>
+<button type="button" data-studio="megaframe">Open MegaFrame</button>
+<button type="button" data-studio="flyer">Open MegaFlyer</button>
+</div>
+</main>
+<script>
+const backend = 'https://rlfdvmiqkbitetatxkju.supabase.co/functions/v1/';
+const apikey = 'sb_publishable_esYvIjnW_CJiP09FN0Pwww_8okkANzw';
+const form = document.querySelector('#login');
+const status = document.querySelector('#status');
+const studios = document.querySelector('#studios');
+const paths = {megaframe:'/megaframe-studio/studio/',flyer:'/flyer-studio/studio/'};
+let session;
+const allowedPage = location.protocol === 'https:' && location.hostname !== 'kzamora19.github.io';
+if (!allowedPage) {
+  form.hidden = true;
+  status.textContent = 'Open this preview on its separate HTTPS staging address.';
+}
+async function request(endpoint, body, authorization = {}) {
+  const response = await fetch(backend + endpoint, {
+    method:'POST', cache:'no-store', credentials:'omit', redirect:'error',
+    headers:{'Content-Type':'application/json',apikey,...authorization},
+    body:JSON.stringify(body)
+  });
+  const result = await response.json();
+  if (!response.ok || result.ok !== true) throw new Error(result.message || 'Staging request was declined.');
+  return result;
+}
+form.addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!allowedPage) return;
+  session = undefined;
+  studios.hidden = true;
+  const submit = form.querySelector('button');
+  const fields = Object.fromEntries(new FormData(form));
+  form.elements.password.value = '';
+  submit.disabled = true;
+  status.textContent = 'Signing in to staging…';
+  try {
+    const data = await request('ptg-auth', {action:'login',...fields});
+    if (!data.authSession?.accessToken || !data.appSessionId) throw new Error('Staging did not return a PTG session.');
+    session = {Authorization:'Bearer '+data.authSession.accessToken,'x-ptg-session-id':data.appSessionId};
+    studios.hidden = false;
+    status.textContent = 'Signed in to staging. Choose a Studio.';
+  } catch (error) {
+    status.textContent = error instanceof TypeError ? 'Staging sign-in could not be reached.' : error.message;
+  } finally {
+    submit.disabled = false;
+  }
+});
+for (const button of studios.querySelectorAll('button')) {
+  button.addEventListener('click', async () => {
+    if (!session) return;
+    button.disabled = true;
+    status.textContent = 'Verifying Studio access…';
+    try {
+      const studio = button.dataset.studio;
+      const data = await request('ptg-studio-access', {action:'issue',studio}, session);
+      if (!/^[A-Za-z0-9_-]{43}$/.test(data.ticket || '')) throw new Error('Staging did not return a valid Studio ticket.');
+      location.assign(paths[studio] + '#ptg_studio_ticket=' + encodeURIComponent(data.ticket));
+    } catch (error) {
+      status.textContent = error instanceof TypeError ? 'This browser origin is not enabled on the staging Studio gateway.' : error.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+</script>
+</html>
