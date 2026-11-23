@@ -68,6 +68,17 @@ jobs:
           old = 'href:"/branchline/"'
           assert old in source, "Staging Sales Tracker link drift"
           p.write_text(source.replace(old, 'href:"/sales-tracker/"'))
+          landing = Path("app/workspace/page.tsx")
+          body = landing.read_text()
+          live = "https://kzamora19.github.io/branchline/"
+          assert live in body, "Workspace production link drift"
+          body = body.replace(live, "https://branchline-staging.github.io/sales-tracker/")
+          start = body.index('      <section className="panel install-panel">\n        <h2>Windows installer</h2>')
+          end = body.index('      </section>', start) + len('      </section>')
+          body = body[:start] + ('      <p className="admin-muted">Windows installers are not provided in isolated staging. Use the browser preview.</p>') + body[end:]
+          landing.write_text(body)
+          mobile = Path("app/workspace/mobile/workspace.tsx")
+          mobile.write_text(mobile.read_text().replace('/branchline/', '/sales-tracker/'))
           PY
           npm install --ignore-scripts --no-package-lock
           npm run build
