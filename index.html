@@ -11,10 +11,18 @@ main{max-width:540px;margin:0 auto;background:white;padding:28px;border-radius:1
 form,label{display:grid;gap:8px}form{gap:14px}input,button{font:inherit;padding:10px}
 button{border:0;border-radius:6px;background:#2348c7;color:white;cursor:pointer}button:disabled{opacity:.55}
 #studios{display:flex;gap:10px;flex-wrap:wrap}[hidden]{display:none!important}
+.bl-unified-brand{display:flex;align-items:center;gap:12px;color:#103d7b;font-size:17px;font-weight:800;margin:4px 0 14px}
+.bl-unified-brand img{width:48px;height:48px;object-fit:contain;border-radius:10px}
+.bl-unified-primary a{display:block;padding:12px 14px;border-radius:8px;background:#2348c7;color:#fff;text-align:center;font-weight:700;text-decoration:none}
+.bl-unified-primary a:hover{background:#163795}
+.bl-unified-notice{font-size:13px;color:#465b7f;line-height:1.5}
 </style>
 <main>
 <h1>Branchline staging sign-in</h1>
+<p class="bl-unified-brand"><img src="/sales-tracker/icons/official/branchline.png" alt="" aria-hidden="true"> Branchline Unified Staging</p>
+<p class="bl-unified-primary"><a href="/first-megasaver-ptg/login/">Open unified PTG sign-in</a></p>
 <p><a href="/sales-tracker/">Open Sales Tracker staging demo</a></p>
+<p class="bl-unified-notice">After signing in to PTG, use the Branchline app menu to open both protected Studios. Data Desk is available only to System Admin accounts.</p>
 <p>Use a dedicated staging PTG account. Keep your live PTG credentials out of this preview.</p>
 <form id="login" method="post">
 <label>Branch code<input name="branchCode" autocomplete="off" maxlength="120"></label>
