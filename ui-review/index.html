@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#132d51">
+<meta name="description" content="Open the four Branchline applications from one workspace.">
+<meta name="referrer" content="no-referrer">
+<title>Branchline Workspace — Your apps</title>
+<link rel="icon" href="/sales-tracker/icons/official/branchline.png">
+<style>
+:root{font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;color:#17253b;background:#f3f6fb;color-scheme:light}
+*{box-sizing:border-box}
+body{margin:0;min-width:320px;min-height:100dvh;background:#f3f6fb}
+header{background:#14345e;color:white;padding:24px max(22px,env(safe-area-inset-left)) 24px;box-shadow:0 3px 12px #172b4930}
+.brand{max-width:1050px;margin:auto;display:flex;align-items:center;gap:14px}
+.brand img{height:47px;width:47px;object-fit:contain;border-radius:11px}
+.brand strong{font-size:clamp(20px,4.3vw,28px);font-weight:760;letter-spacing:-.7px}
+main{max-width:1050px;margin:auto;padding:30px 22px 55px}
+h1{font-size:clamp(35px,7vw,52px);line-height:1.12;margin:0 0 15px;font-weight:770;letter-spacing:-1.3px}
+.intro{color:#65788b;font-size:clamp(17px,3.6vw,21px);line-height:1.55;max-width:620px;margin:0 0 30px}
+.cards{display:grid;grid-template-columns:1fr;gap:16px}
+.card{color:#17324f;text-decoration:none;display:grid;align-items:center;grid-template-columns:68px minmax(0,1fr) 21px;gap:18px;background:#fff;border:1px solid #d7e4ef;border-radius:18px;box-shadow:0 4px 10px #152a4312;padding:21px;min-height:132px;transition:box-shadow .15s,border-color .15s,transform .15s}
+.card:hover{border-color:#8cadf3;box-shadow:0 8px 22px #102b5040;transform:translateY(-1px)}
+.card:focus-visible{outline:3px solid #3b61ef;outline-offset:4px}
+.app-icon{width:68px;height:68px;display:grid;place-items:center;background:#315bd5;border-radius:15px;color:#fff}
+.app-icon svg{width:46px;height:46px;fill:none;stroke:currentColor;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+.app-icon.frame{background:linear-gradient(140deg,#1649c5,#15a5ce)}
+.app-icon.flyer{background:linear-gradient(140deg,#355ee8,#167acb)}
+.app-icon.ptg{background:linear-gradient(140deg,#2049b2,#3369ef)}
+.card .copy{min-width:0}
+.card strong{font-size:clamp(18px,3vw,23px);line-height:1.25;font-weight:740;display:block;margin:0 0 5px}
+.card small{display:block;font-size:clamp(15px,2.7vw,18px);line-height:1.38;color:#60798d}
+.arrow{justify-self:end;color:#1f416b;font-size:28px;font-weight:500}
+footer{max-width:1050px;margin:18px auto 0;padding:0 22px 40px;color:#667c8e;font-size:15px}
+footer p{margin:0}
+@media(min-width:900px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:430px){header{padding:20px 18px}main{padding:28px 18px 20px}.card{grid-template-columns:60px minmax(0,1fr) 15px;gap:13px;padding:17px 15px;min-height:116px}.app-icon{width:60px;height:60px}.app-icon svg{width:40px;height:40px}.card strong{font-size:17px}.card small{font-size:15px}footer{padding:0 18px 36px}}
+</style>
+<style>
+/* Branchline workspace launcher */
+:root { --bl-navy:#09264f; --bl-royal:#075cf5; --bl-cyan:#0dd9eb; --bl-teal:#00e4c1; }
+body{background:#f2f6fb}
+header{background:linear-gradient(110deg,#09264f,#0b3d80)}
+header{padding:8px 24px}
+header .brand{min-height:48px;max-width:1100px;padding:0 24px}
+.brand-copy{display:grid;gap:1px}
+main{max-width:1100px;padding:26px 24px 35px}
+.welcome{padding:18px 24px;border-radius:18px;background:linear-gradient(115deg,#082957,#0752c8 70%,#0e92ce);color:#fff;box-shadow:0 12px 27px #08295727}
+.welcome h1{font-size:clamp(25px,4vw,34px);margin:0 0 10px;line-height:1.15}
+.welcome .intro{margin:0;color:#e5f4ff;max-width:550px;font-size:clamp(15px,2.5vw,17px)}
+.welcome + .cards{margin-top:18px}
+.cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.card{min-height:96px;display:flex;align-items:center;gap:16px;padding:19px;border-radius:16px;border:1px solid #79b9ee;background:#fff;box-shadow:none}
+.card:hover{background:transparent;border-color:#075cf5;box-shadow:none}
+.app-icon{display:block;width:77px;height:77px;flex:0 0 77px;object-fit:contain;border-radius:18px;background:transparent;}
+.card .copy{min-width:0;flex:1}
+.card strong{font-size:clamp(17px,2.5vw,20px)}
+.card small{font-size:14px}
+.arrow{margin-left:auto}
+.card:focus-visible{outline:3px solid var(--bl-cyan)}
+@media(max-width:680px){
+  header{padding:8px 14px}
+  header .brand{min-height:44px;padding:0}
+  header .brand img{width:39px;height:39px}
+  main{padding:18px 14px 30px}
+  .welcome{padding:22px 20px;border-radius:15px}
+  .cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .card{min-height:162px;flex-direction:column;gap:7px;text-align:center;padding:14px 8px}
+  .app-icon{width:68px;height:68px;flex:0 0 68px}
+  .card strong{font-size:14px;line-height:1.25}
+  .card small{font-size:11px;line-height:1.35;margin-top:4px}
+  .arrow{display:none}
+}
+@media(prefers-reduced-motion:reduce){.card{transition:none}.card:hover{transform:none}}
+
+</style>
+<style>
+/* Branchline mobile app drawer: outlined transparent rows, no filled app tiles.
+   Staged for review; auth destinations are copied from existing launcher cards. */
+.mobile-app-menu{display:none;align-items:center;justify-content:center;width:43px;height:43px;
+  border:1px solid #6c9bc7;border-radius:9px;background:#19578e;color:#fff;
+  font-size:23px;line-height:1;flex:0 0 auto}
+.mobile-app-menu:focus-visible,.drawer-app:focus-visible{
+  outline:3px solid #0dd9eb;outline-offset:2px}
+.app-drawer-overlay[hidden]{display:none!important}
+.app-drawer-overlay{position:fixed;inset:65px 0 0;background:#051e439e;z-index:60;
+  display:flex;align-items:stretch}
+.app-drawer{width:min(84vw,345px);height:100%;overflow-y:auto;overscroll-behavior:contain;
+  background:linear-gradient(180deg,#0a2e60,#09264f);color:#fff;padding:19px 16px 28px;
+  box-shadow:10px 0 28px #051b3552}
+.app-drawer h2{font-size:17px;line-height:1.3;margin:0 0 20px;letter-spacing:0;color:#fff}
+.drawer-apps{display:grid;align-content:start;gap:9px}
+.drawer-app{display:flex;align-items:center;gap:12px;min-height:62px;width:100%;padding:9px 12px;
+  text-decoration:none;color:#fff;border:1px solid #79b9ee;background:transparent;border-radius:12px;
+  box-shadow:none;transition:border-color .15s}
+.drawer-app:hover{background:transparent;border-color:#cbf3ff}
+.drawer-app .app-icon{display:block;width:42px;height:42px;min-width:42px;border-radius:9px;
+  object-fit:contain;background:transparent}
+.drawer-app .copy{min-width:0;flex:1}
+.drawer-app .copy strong{font-size:14px;line-height:1.25;color:#fff;margin:0}
+.drawer-app .copy small,.drawer-app .arrow{display:none}
+@media(max-width:680px){
+  .mobile-app-menu{display:inline-flex}
+  header .brand{gap:10px}
+}
+@media(min-width:681px){.app-drawer-overlay{display:none!important}}
+@media(prefers-reduced-motion:reduce){.drawer-app{transition:none}}
+
+/* Keep the hamburger available above the open overlay so it can close the drawer. */
+@media(max-width:680px){header{position:relative;z-index:65}.app-drawer-overlay{z-index:60}}
+
+</style>
+<style>
+/* Approved Branchline dual navigation — development only.
+   Persistent app rail + original application workspace sidebar. */
+:root{--bl-rail-width:78px;--bl-rail-navy:#082853;--bl-rail-cyan:#09cceb;}
+.bl-app-rail{
+  position:fixed;inset:0 auto 0 0;width:var(--bl-rail-width);
+  display:flex;flex-direction:column;gap:9px;align-items:stretch;
+  padding:10px 7px;background:linear-gradient(180deg,#0d3466,var(--bl-rail-navy));
+  border-right:1px solid #2b5687;z-index:12;overflow-y:auto;scrollbar-width:thin;
+}
+.bl-app-rail a{flex:0 0 auto;min-height:60px;color:#e7f5ff;text-decoration:none;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:4px;border-radius:10px;border:1px solid transparent;padding:5px 3px;
+  background:transparent;font:600 10px/1.2 "Segoe UI",Arial,sans-serif;text-transform:none}
+.bl-app-rail .bl-rail-brand{min-height:62px;margin-bottom:10px;border-bottom:1px solid #315786;border-radius:0}
+.bl-app-rail a:hover{background:transparent;border-color:#72b8ee}
+.bl-app-rail a.is-active,.bl-app-rail a[aria-current="page"]{
+  background:transparent;border-color:#0dd9eb;box-shadow:inset 3px 0 #0dd9eb;color:#fff}
+.bl-app-rail a:focus-visible,.bl-app-switcher:focus-visible,.bl-drawer-link:focus-visible{
+  outline:3px solid #0dd9eb;outline-offset:2px}
+.bl-app-rail img{width:40px;height:40px;object-fit:contain;border-radius:10px}
+.bl-app-rail .bl-rail-brand img{width:43px;height:43px}
+.bl-has-app-rail .connected-sidebar,.bl-has-app-rail>.sidebar{
+  left:var(--bl-rail-width);
+}
+.bl-has-app-rail .connected-main,.bl-has-app-rail>.main-area{
+  margin-left:calc(246px + var(--bl-rail-width));
+}
+.bl-app-switcher{display:none;border:1px solid #4e88b9;color:#fff;border-radius:9px;
+  background:#123e73;min-height:41px;min-width:41px;font:700 22px/1 system-ui;cursor:pointer}
+.bl-app-overlay[hidden]{display:none!important}
+.bl-app-overlay{position:fixed;inset:var(--topbar-height,60px) 0 0;z-index:14;
+  background:#051e439d;display:flex;align-items:stretch}
+.bl-app-drawer{width:min(85vw,340px);height:100%;padding:19px 15px 28px;
+  overflow:auto;overscroll-behavior:contain;background:linear-gradient(180deg,#0c3264,#082853);
+  box-shadow:8px 0 24px #051b3552;color:#fff;text-transform:none}
+.bl-app-drawer h2{font:700 17px/1.35 system-ui;margin:0 0 19px;color:#fff}
+.bl-app-drawer nav{display:grid;gap:9px}
+.bl-drawer-link{display:flex;align-items:center;gap:12px;min-height:64px;
+  padding:9px 12px;border:1px solid #79b9ee;border-radius:12px;
+  color:#fff;text-decoration:none;background:transparent;font:600 15px/1.25 system-ui}
+.bl-drawer-link img{width:44px;height:44px;object-fit:contain;border-radius:9px}
+.bl-drawer-link:hover,.bl-drawer-link.is-active{
+  background:transparent;border-color:#0dd9eb}
+.bl-drawer-link.is-active{box-shadow:inset 3px 0 #0dd9eb}
+@media(min-width:761px) and (max-width:1000px){
+  .bl-has-app-rail>.sidebar{left:var(--bl-rail-width)}
+  .bl-has-app-rail>.main-area{margin-left:calc(218px + var(--bl-rail-width))}
+}
+@media(max-width:760px){
+  .bl-app-rail{display:none!important}
+  .bl-has-app-rail .connected-sidebar,.bl-has-app-rail>.sidebar{
+    left:0;top:var(--topbar-height,58px);bottom:0;
+    height:calc(100dvh - var(--topbar-height,58px));
+    z-index:12;overflow-y:auto
+  }
+  .bl-has-app-rail .connected-main,.bl-has-app-rail>.main-area{margin-left:0}
+  .bl-app-switcher{display:inline-grid;place-items:center;flex:0 0 41px;
+    color:#fff;background:#184e89}
+  .bl-has-app-rail .connected-topbar,.bl-has-app-rail .topbar{
+    gap:10px;z-index:20;position:sticky;top:0
+  }
+  /* Keep both menu triggers above the workspace drawer, not only the app drawer. */
+  .bl-app-menu-open .connected-topbar,.bl-app-menu-open .topbar{z-index:20}
+  .bl-app-overlay{inset:var(--topbar-height,58px) 0 0}
+  .bl-app-drawer nav{display:grid}
+}
+/* Launcher-only rail. Never move the existing workspace menu out of the Sales app. */
+@media(min-width:681px){
+  body.bl-launcher-rail header .brand{padding-left:calc(var(--bl-rail-width) + 22px)}
+  body.bl-launcher-rail main{margin-left:var(--bl-rail-width);max-width:calc(1100px - var(--bl-rail-width));
+    width:calc(100% - var(--bl-rail-width))}
+  body.bl-launcher-rail footer{margin-left:var(--bl-rail-width)}
+}
+@media(max-width:680px){
+  body.bl-launcher-rail .bl-app-rail{display:none}
+}
+@media(prefers-reduced-motion:reduce){
+  .bl-app-rail a,.bl-drawer-link{transition:none}
+}
+
+/* Official dual-control directive: clickable Branchline logo is the ONLY app-menu control. */
+.bl-app-rail .bl-rail-brand{display:flex;width:100%;align-items:center;justify-content:center;
+  flex:0 0 62px;min-height:62px;cursor:pointer;color:white;
+  background:transparent;border:1px solid transparent;border-bottom-color:#315786;
+  border-radius:10px;padding:7px 3px}
+.bl-app-rail .bl-rail-brand:hover,.bl-app-rail .bl-rail-brand.is-open{
+  border-color:#73c7f0;background:#103e70}
+.bl-app-rail .bl-rail-brand:focus-visible,.bl-mobile-brand:focus-visible{
+  outline:3px solid #0dd9eb;outline-offset:2px}
+.bl-mobile-brand{display:none;align-items:center;justify-content:center;width:44px;height:44px;
+  flex:0 0 44px;border-radius:10px;border:1px solid #79b9ee;
+  background:#123e73;padding:5px;cursor:pointer}
+.bl-mobile-brand img{display:block;width:33px;height:33px;object-fit:contain;border-radius:7px}
+.bl-mobile-brand:hover,.bl-mobile-brand.is-open{border-color:#0dd9eb;background:#184e89}
+.bl-app-switcher{display:none!important}
+@media(min-width:761px){
+  .bl-has-app-rail .bl-app-overlay{inset:0 0 0 var(--bl-rail-width);z-index:11}
+  .bl-has-app-rail .bl-app-rail{z-index:16}
+  .bl-has-app-rail .bl-app-drawer{width:290px;border-right:1px solid #2b5687}
+}
+@media(max-width:760px){
+  .bl-mobile-brand{display:inline-flex}
+  .bl-has-app-rail .bl-app-overlay{inset:var(--topbar-height,58px) 0 0;z-index:17}
+  .bl-has-app-rail .connected-topbar,.bl-has-app-rail .topbar{z-index:20}
+}
+body.bl-launcher-rail .bl-mobile-brand{display:none}
+body.bl-launcher-rail .bl-app-overlay{z-index:14}
+@media(max-width:760px){
+  body.bl-launcher-rail .bl-mobile-brand{display:inline-flex}
+  body.bl-launcher-rail header{position:relative;z-index:20}
+  body.bl-launcher-rail .bl-app-overlay{inset:65px 0 0}
+}
+/* The rail is permanent; the standalone app-card directory becomes a secondary,
+   backwards-compatible route rather than the default navigation mechanism. */
+.bl-launcher-rail .bl-app-rail{position:fixed}
+.bl-app-drawer nav .bl-drawer-link{background:transparent;border:1px solid #79b9ee}
+
+
+/* Exact approved four-icon sprite cropped from the saved six-icon reference (no redesign). */
+.bl-official-app-icon{display:block;width:42px;height:42px;flex:0 0 42px;
+ background-image:url("/sales-tracker/icons/official/four-apps.png");background-repeat:no-repeat;
+ background-size:84px 84px;background-position:0 0;border-radius:9px}
+.bl-official-app-icon.sales-tracker{background-position:-42px 0}
+.bl-official-app-icon.megaframe-studio{background-position:0 -42px}
+.bl-official-app-icon.flyer-studio{background-position:-42px -42px}
+.bl-launcher-rail .bl-official-app-icon{background-image:url("/sales-tracker/icons/official/four-apps.png")}
+.bl-app-drawer .bl-official-app-icon{background-image:url("/sales-tracker/icons/official/four-apps.png")}
+.bl-launcher-rail .bl-app-drawer .bl-official-app-icon{background-image:url("/sales-tracker/icons/official/four-apps.png")}
+
+</style>
+<style>
+.bl-official-card-icon{width:56px;height:56px;display:inline-block;flex:0 0 56px;
+ background-image:url("/sales-tracker/icons/official/four-apps.png")!important;
+ background-size:112px 112px!important;background-position:0 0!important;
+ background-color:transparent!important;border:0!important}
+.bl-official-card-icon.sales-tracker{background-position:-56px 0!important}
+.bl-official-card-icon.megaframe-studio{background-position:0 -56px!important}
+.bl-official-card-icon.flyer-studio{background-position:-56px -56px!important}
+</style>
+</head>
+<body>
+<header><div class="brand"><button id="mobileAppMenu" class="bl-mobile-brand" type="button" aria-expanded="false" aria-label="Open application list"><img src="/sales-tracker/icons/official/branchline.png" alt="" aria-hidden="true"></button><img src="/sales-tracker/icons/official/branchline.png" alt=""><span class="brand-copy"><strong>Branchline Workspace</strong></span></div></header>
+<main>
+<section class="welcome"><h1>Your apps</h1><p class="intro">Choose an application to continue. Your existing sign-in and permissions still apply.</p></section>
+
+<nav class="cards" aria-label="Branchline applications">
+<a class="card" data-app="price-tag-generator" href="https://branchline-staging.github.io/first-megasaver-ptg/products/" referrerpolicy="no-referrer" aria-label="Open Price Tag Generator">
+<span class="app-icon bl-official-card-icon price-tag-generator" aria-hidden="true"></span>
+<span class="copy"><strong>Price Tag Generator</strong><small>Find products and prepare price tags</small></span><span class="arrow" aria-hidden="true">→</span></a>
+<a class="card" data-app="sales-tracker" href="/sales-tracker/" aria-label="Open Sales Tracker">
+<span class="app-icon bl-official-card-icon sales-tracker" aria-hidden="true"></span>
+<span class="copy"><strong>Sales Tracker</strong><small>Track sales and review performance</small></span><span class="arrow" aria-hidden="true">→</span></a>
+<a class="card" data-app="megaframe-studio" href="https://branchline-staging.github.io/first-megasaver-ptg/studios/?studio=megaframe" referrerpolicy="no-referrer" aria-label="Open MegaFrame Studio through PTG">
+<span class="app-icon bl-official-card-icon megaframe-studio" aria-hidden="true"></span>
+<span class="copy"><strong>MegaFrame Studio</strong><small>Create photo frames and personalized layouts</small></span><span class="arrow" aria-hidden="true">→</span></a>
+<a class="card" data-app="flyer-studio" href="https://branchline-staging.github.io/first-megasaver-ptg/studios/?studio=flyer" referrerpolicy="no-referrer" aria-label="Open MegaFlyer Studio through PTG">
+<span class="app-icon bl-official-card-icon flyer-studio" aria-hidden="true"></span>
+<span class="copy"><strong>MegaFlyer Studio</strong><small>Create flyers and promotional artwork</small></span><span class="arrow" aria-hidden="true">→</span></a>
+</nav>
+</main>
+
+<footer><p id="install-message">Staging review. App links open the existing staging builds.</p></footer>
+<script>
+/* Public Branchline application directory: navigation only.
+ * Opening an app never forwards the Branchline access token or password.
+ * Each destination enforces its own account/role permissions. */
+(() => {
+  "use strict";
+  const list = [
+    {
+      id: "sales-tracker",
+      name: "Sales Tracker",
+      monogram: "ST",
+      description: "Sales entry, team performance, targets, analytics and inventory.",
+      access: "Your current Branchline workspace",
+      kind: "workspace",
+      url: "",
+    },
+    {
+      id: "price-tag-generator",
+      name: "Price Tag Generator",
+      monogram: "PT",
+      description: "Find products, review selling prices, prepare and print price tags.",
+      access: "Existing PTG account permissions apply",
+      kind: "external",
+      url: "https://branchline-staging.github.io/first-megasaver-ptg/products/",
+    },
+    {
+      id: "megaframe-studio",
+      name: "MegaFrame Studio",
+      monogram: "MF",
+      description: "Edit photos, build personalized frames and export print-ready layouts.",
+      access: "Requires active PTG Team Leader, Branch Admin or System Admin access",
+      kind: "external",
+      url: "https://branchline-staging.github.io/first-megasaver-ptg/studios/?studio=megaframe", // PTG authorization; editor is never public
+    },
+    {
+      id: "flyer-studio",
+      name: "MegaFlyer Studio",
+      monogram: "FS",
+      description: "Create promotional flyers, manage product bundles and export PDF artwork.",
+      access: "Requires active PTG Team Leader, Branch Admin or System Admin access",
+      kind: "external",
+      url: "https://branchline-staging.github.io/first-megasaver-ptg/studios/?studio=flyer", // PTG authorization; editor is never public
+    },
+  ];
+  for (const app of list) {
+    if (app.kind === "external") {
+      const target = new URL(app.url);
+      const knownStudio = app.id === "megaframe-studio" ? "megaframe" :
+        app.id === "flyer-studio" ? "flyer" : "";
+      const query = knownStudio ? "?studio=" + knownStudio : "";
+      if (target.protocol !== "https:" || target.origin !== "https://branchline-staging.github.io" ||
+          target.username || target.password || target.hash || target.search !== query ||
+          (knownStudio && target.pathname !== "/first-megasaver-ptg/studios/"))
+        throw new Error("Unrecognized Branchline application URL.");
+    }
+    Object.freeze(app);
+  }
+  window.BranchlineApplications = Object.freeze({ list: Object.freeze(list) });
+})();
+
+</script>
+<script>
+/* Universal Branchline application rail — development only.
+ * The logo (never the workspace hamburger) opens the application list.
+ * The original BranchlineApplications directory owns all destinations;
+ * authorization is checked by the destination app, never by this rail. */
+(() => {
+  "use strict";
+  const catalog = window.BranchlineApplications?.list;
+  if (!Array.isArray(catalog) || catalog.length !== 4) return;
+  const order = ["price-tag-generator", "sales-tracker", "megaframe-studio", "flyer-studio"];
+  const directory = order.map(id => catalog.find(app => app.id === id));
+  if (directory.some(app => !app)) return;
+  const shortNames = {
+    "price-tag-generator": "PTG", "sales-tracker": "Sales",
+    "megaframe-studio": "Frame", "flyer-studio": "Flyer"
+  };
+  const isLauncher = !!document.querySelector("nav.cards[aria-label='Branchline applications']");
+  const base = isLauncher ? "/sales-tracker/" : "./";
+  const installed = window.matchMedia("(display-mode: standalone)").matches ||
+    window.navigator.standalone === true;
+
+  function appLink(app, compact) {
+    const link = document.createElement("a");
+    link.className = compact ? "bl-rail-link" : "bl-drawer-link";
+    link.href = app.id === "sales-tracker" ? base : app.url;
+    if (app.id !== "sales-tracker") {
+      link.target = installed ? "_self" : "_blank";
+      link.rel = "noopener noreferrer";
+      link.referrerPolicy = "no-referrer";
+    }
+    link.title = app.name;
+    link.setAttribute("aria-label", "Open " + app.name);
+    if (!isLauncher && app.id === "sales-tracker") {
+      link.classList.add("is-active");
+      link.setAttribute("aria-current", "page");
+    }
+    const icon = document.createElement("span");
+    icon.className = "bl-official-app-icon " + app.id;
+    icon.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.textContent = shortNames[app.id];
+    link.append(icon, label);
+    return link;
+  }
+
+  function makeLogoButton(className, id, drawerId) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = className;
+    if (id) button.id = id;
+    button.setAttribute("aria-label", "Open application list");
+    button.setAttribute("aria-expanded", "false");
+    button.setAttribute("aria-controls", drawerId);
+    button.title = "Branchline applications";
+    const image = document.createElement("img");
+    image.src = base + "icons/official/branchline.png";
+    image.alt = "";
+    image.setAttribute("aria-hidden", "true");
+    button.append(image);
+    return button;
+  }
+
+  function mount(root, header, key, workspaceButtonSelector) {
+    const drawerId = "bl-app-drawer-" + key;
+    root.classList.add("bl-has-app-rail");
+    if (isLauncher) root.classList.add("bl-launcher-rail");
+    const rail = document.createElement("nav");
+    rail.className = "bl-app-rail";
+    rail.setAttribute("aria-label", "Branchline applications");
+    const brand = makeLogoButton("bl-rail-brand", "", drawerId);
+    rail.append(brand);
+    for (const app of directory) rail.append(appLink(app, true));
+    root.prepend(rail);
+
+    let mobile = isLauncher ? document.getElementById("mobileAppMenu") : null;
+    if (!mobile) {
+      mobile = makeLogoButton("bl-mobile-brand", "", drawerId);
+      header.prepend(mobile);
+    } else {
+      // The launcher header is also an actual logo button, never a hamburger.
+      mobile.classList.add("bl-mobile-brand");
+      mobile.setAttribute("aria-controls", drawerId);
+    }
+
+    const overlay = document.createElement("div");
+    overlay.id = drawerId;
+    overlay.className = "bl-app-overlay";
+    overlay.hidden = true;
+    const drawer = document.createElement("aside");
+    drawer.className = "bl-app-drawer";
+    drawer.setAttribute("aria-label", "Branchline application list");
+    const heading = document.createElement("h2");
+    heading.textContent = "Branchline applications";
+    const links = document.createElement("nav");
+    links.setAttribute("aria-label", "Choose an application");
+    for (const app of directory) links.append(appLink(app, false));
+    drawer.append(heading, links);
+    overlay.append(drawer);
+    root.append(overlay);
+
+    const triggers = [brand, mobile];
+    function syncButtons(open) {
+      for (const button of triggers) {
+        button.setAttribute("aria-expanded", String(open));
+        button.setAttribute("aria-label", open ? "Close application list" : "Open application list");
+        button.classList.toggle("is-open", open);
+      }
+    }
+    function close(restoreFocus = false, source = brand) {
+      overlay.hidden = true;
+      root.classList.remove("bl-app-menu-open");
+      syncButtons(false);
+      if (restoreFocus) source.focus();
+    }
+    function open() {
+      // Only one drawer may be open; the workspace hamburger keeps its own role.
+      root.querySelector(".connected-sidebar, .sidebar")?.classList.remove("open");
+      overlay.hidden = false;
+      root.classList.add("bl-app-menu-open");
+      syncButtons(true);
+    }
+    for (const button of triggers) {
+      button.addEventListener("click", () => overlay.hidden ? open() : close(true, button));
+    }
+    overlay.addEventListener("click", event => {
+      if (event.target === overlay) close(true, window.matchMedia("(max-width:760px)").matches ? mobile : brand);
+    });
+    links.addEventListener("click", event => {
+      if (event.target.closest("a")) close();
+    });
+    if (workspaceButtonSelector) {
+      header.querySelector(workspaceButtonSelector)?.addEventListener("click", () => close());
+    }
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape" && !overlay.hidden) {
+        event.preventDefault();
+        close(true, window.matchMedia("(max-width:760px)").matches ? mobile : brand);
+      }
+    });
+  }
+
+  if (isLauncher) {
+    const header = document.querySelector("header");
+    if (header) mount(document.body, header, "launcher", null);
+  } else {
+    for (const [selector, key, headerSelector, menu] of [
+      [".connected-shell", "connected", ".connected-topbar", "#connected-menu"],
+      ["#demo-app", "demo", ".topbar", "#mobile-menu"]
+    ]) {
+      const root = document.querySelector(selector);
+      const header = root?.querySelector(headerSelector);
+      if (root && header) mount(root, header, key, menu);
+    }
+  }
+})();
+
+</script>
+
+</body>
+</html>
