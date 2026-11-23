@@ -1,0 +1,56 @@
+import os, pathlib, shutil, hashlib, json, re
+from pathlib import Path
+root=Path(__file__).resolve().parents[1]
+parent=root.parent
+out=root/"staging-site-dist"
+stage="rlfdvmiqkbitetatxkju"
+key=os.environ["STAGING_SUPABASE_PUBLISHABLE_KEY"]
+assert os.environ.get("BRANCHLINE_ISOLATED_STAGE")=="1"
+assert key.startswith("sb_publishable_")
+assert os.environ.get("GITHUB_REPOSITORY","branchline-staging/branchline-staging.github.io")=="branchline-staging/branchline-staging.github.io"
+shutil.rmtree(out,ignore_errors=True);out.mkdir()
+for name in ("index.html",".nojekyll"):shutil.copy2(root/name,out/name)
+original=(root/"index.html").read_bytes()
+assert b"Branchline staging sign-in" in original and b"rlfdvmiqkbitetatxkju" in original
+assert (out/"index.html").read_bytes()==original
+src=parent/"branchline"; dest=out/"sales-tracker";dest.mkdir()
+allowed={".html",".js",".mjs",".css",".json",".webmanifest",".svg",".png",".jpg",".jpeg",".webp",".ico",".woff2",".wasm"}
+for file in src.iterdir():
+ if file.is_dir():
+  if file.name in ("apps","icons","import-engine"):shutil.copytree(file,dest/file.name)
+ elif file.suffix in allowed and not re.search(r"(^|[-_.])(test|spec)[.]",file.name):
+  shutil.copy2(file,dest/file.name)
+p=dest/"supabase-config.js";s=p.read_text()
+assert "psoopubvdpwztzkdyifa" in s and "sb_publishable_e_6K64Wul2fJEq2KiuvnTA_NmuaKqNm" in s
+p.write_text(s.replace("psoopubvdpwztzkdyifa",stage).replace("sb_publishable_e_6K64Wul2fJEq2KiuvnTA_NmuaKqNm",key))
+for file in ("branchline-applications.js","apps/index.html"):
+ p=dest/file;s=p.read_text();assert "kzamora19.github.io" in s
+ p.write_text(s.replace("kzamora19.github.io","branchline-staging.github.io"))
+p=dest/"index.html";p.write_text(p.read_text().replace("Branchline — Sales workspace","Branchline — Sales Tracker staging"))
+assert "branchline-staging.github.io/first-megasaver-ptg/studios/" in (dest/"branchline-applications.js").read_text()
+ptg=parent/"first-megasaver-ptg"/"out"
+assert (ptg/"studios/index.html").exists()
+shutil.copytree(ptg,out/"first-megasaver-ptg")
+assert (out/"first-megasaver-ptg/icons/official/data-desk.png").exists()
+for app,legacy in (("megaframe-studio","vmyoxoiygfcecgkbavgg"),("flyer-studio","tzklsscoiwnmeantcefw")):
+ origin=parent/app/"staging/stage-pages-cutover/studio"
+ assert (origin/"index.html").exists()
+ target=out/app/"studio";shutil.copytree(origin,target)
+ p=target/"index.html"
+ s=p.read_text().replace(legacy,stage).replace("kzamora19.github.io","branchline-staging.github.io")
+ assert stage+".supabase.co/functions/v1/" in s and "Branchline applications" in s
+ assert key in s
+ assert not re.search(r'<canvas|PRIVATE (MEGAFRAME )?EDITOR BUNDLE|id="photosInput"|id="quickSaveProject"',s,re.I)
+ p.write_text(s)
+forbidden=["psoopubvdpwztzkdyifa","agknxlowackphvwyvxge","vmyoxoiygfcecgkbavgg","tzklsscoiwnmeantcefw","https://kzamora19.github.io","https://first-megasaver-ptg.vercel.app"]
+n=0
+for p in out.rglob("*"):
+ if not p.is_file():continue
+ n+=1
+ if p.suffix not in (".html",".js",".mjs",".css",".json",".svg",".webmanifest"):continue
+ data=p.read_text(errors="replace")
+ for value in forbidden:assert value not in data, f"Production reference {value} in {p.relative_to(out)}"
+paths=("index.html","sales-tracker/index.html","first-megasaver-ptg/studios/index.html","megaframe-studio/studio/index.html","flyer-studio/studio/index.html")
+digest={p:hashlib.sha256((out/p).read_bytes()).hexdigest() for p in paths}
+(out/"STAGING-RELEASE-MANIFEST.json").write_text(json.dumps({"host":"branchline-staging.github.io","supabase":stage,"files":n,"rootPreserved":True,"privateEditorsPublished":False,"sha256":digest},indent=2))
+print("STAGING BUILD COMPLETE",n,digest)
