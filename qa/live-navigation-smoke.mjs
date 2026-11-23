@@ -15,6 +15,10 @@ try{
  await a.waitFor({state:"visible"});
  assert.equal(await a.getAttribute("href"),"/first-megasaver-ptg/login/");
  const image=root.locator(".bl-unified-brand img");
+ const logoResponse=await root.request.get(origin+"/sales-tracker/icons/official/branchline.png");
+ console.log("Official icon HTTP",logoResponse.status(),"type",logoResponse.headers()["content-type"]);
+ assert.equal(logoResponse.status(),200,"Official logo asset must be hosted on staging");
+ await image.evaluate(async x=>{if(!x.complete)await new Promise((resolve,reject)=>{x.addEventListener("load",resolve,{once:true});x.addEventListener("error",reject,{once:true});});});
  assert.ok(await image.evaluate(x=>x.complete && x.naturalWidth>0),"Official logo rendered");
  await root.screenshot({path:out+"/unified-staging-entry-desktop.png",fullPage:true});
  const ptg=await root.goto(origin+"/first-megasaver-ptg/login/",{waitUntil:"domcontentloaded"});
