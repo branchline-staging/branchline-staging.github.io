@@ -27,6 +27,13 @@ for file in ("branchline-applications.js","apps/index.html"):
  p=dest/file;s=p.read_text();assert "kzamora19.github.io" in s
  p.write_text(s.replace("kzamora19.github.io","branchline-staging.github.io"))
 p=dest/"index.html";p.write_text(p.read_text().replace("Branchline — Sales workspace","Branchline — Sales Tracker staging"))
+# All absolute links in the staged Sales Tracker copy must stay on the
+# separate staging origin; normalize former /branchline/ links as /sales-tracker/.
+for item in dest.rglob("*"):
+ if not item.is_file() or item.suffix not in (".html",".js",".mjs",".css",".json",".webmanifest",".svg"):continue
+ body=item.read_text(errors="replace")
+ revised=body.replace("https://kzamora19.github.io/branchline/","https://branchline-staging.github.io/sales-tracker/").replace("https://kzamora19.github.io","https://branchline-staging.github.io")
+ if revised!=body:item.write_text(revised)
 assert "branchline-staging.github.io/first-megasaver-ptg/studios/" in (dest/"branchline-applications.js").read_text()
 ptg=parent/"first-megasaver-ptg"/"out"
 assert (ptg/"studios/index.html").exists()
