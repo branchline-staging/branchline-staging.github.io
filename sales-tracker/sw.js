@@ -1,0 +1,127 @@
+"use strict";
+
+const CACHE_NAME = "branchline-shell-v199";
+const APP_SHELL_URLS = [
+  "./",
+  "./index.html",
+  "./install.html",
+  "./apps/",
+  "./apps/index.html",
+  "./apps/branchline-ui-stage.css",
+  "./apps/branchline-outlined-drawer.css",
+  "./branchline-app-rail.css?v=ui-rail-20261123",
+  "./branchline-app-rail.js?v=ui-rail-20261123",
+  "./styles.css",
+  "./styles.css?v=ps-ranking-table-20261119",
+  "./styles.css?v=apps-hub-20261119",
+  "./styles.css?v=ps-assist-link-20261121",
+  "./styles.css?v=unified-ui-20261123",
+  "./auth-app.js",
+  "./ps-certificates.mjs",
+  "./management-reports.mjs",
+  "./management-charts.mjs",
+  "./manager-attention.js",
+  "./ps-performance.js",
+  "./auth-app.js?v=ps-ranking-table-20261119",
+  "./branchline-applications.js",
+  "./branchline-applications.js?v=megaframe-pages-20261121",
+  "./branchline-applications.js?v=unified-four-apps-20261122",
+  "./auth-app.js?v=apps-hub-20261119",
+  "./auth-app.js?v=ps-equal-share-20261121",
+  "./auth-app.js?v=certificate-label-20261121",
+  "./auth-app.js?v=ps-assist-review-20261121",
+  "./auth-app.js?v=calendar-notices-on-open-20261123",
+  "./ps-certificates.mjs?v=certificate-label-20261121",
+  "./certificate-periods.mjs?v=certificate-label-20261121",
+  "./table-ui.js",
+  "./promotion-review-ui.mjs",
+  "./unified-import.mjs",
+  "./unified-import-ui.mjs",
+  "./import-engine/core.mjs",
+  "./import-engine/brand-reference.mjs",
+  "./import-engine/promotion-pdf.mjs",
+  "./import-engine/promotion-import.mjs",
+  "./import-engine/promotion-sheet.mjs",
+  "./import-engine/promotion-bundles.mjs",
+  "./import-engine/promotion-allocation.mjs",
+  "./demo-data.js",
+  "./inventory.js",
+  "./sales-delivery.js",
+  "./sales-returns.mjs",
+  "./inventory-demo.js",
+  "./currency.js",
+  "./analytics.js",
+  "./sales-history.js",
+  "./daily-history.js",
+  "./supabase-config.js",
+  "./manifest.webmanifest",
+  "./icon.svg",
+  "./icons/icon-192.png",
+  "./icons/icon-512.png",
+  "./icons/maskable-192.png",
+  "./icons/maskable-512.png",
+  "./icons/apple-touch-icon.png",
+  "./icons/official/branchline.png",
+  "./icons/official/four-apps.png",
+].map(path => new URL(path, self.registration.scope).href);
+const APP_SHELL = new Set(APP_SHELL_URLS);
+
+self.addEventListener("install", event => {
+  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)));
+  self.skipWaiting();
+});
+
+self.addEventListener("activate", event => {
+  event.waitUntil(
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(key => key.startsWith("branchline-") && key !== CACHE_NAME).map(key => caches.delete(key))))
+      .then(() => self.clients.claim()),
+  );
+});
+
+self.addEventListener("push", event => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch { data = { body: event.data ? event.data.text() : "" }; }
+  event.waitUntil(self.registration.showNotification(data.title || "Branchline", {
+    body: data.body || "",
+    icon: new URL("./icons/icon-192.png", self.registration.scope).href,
+    badge: new URL("./icons/icon-192.png", self.registration.scope).href,
+    tag: data.tag || "branchline",
+    data: { url: data.url || "./" },
+  }));
+});
+
+self.addEventListener("notificationclick", event => {
+  event.notification.close();
+  const target = new URL(event.notification.data?.url || "./", self.registration.scope).href;
+  event.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(clients => {
+    const open = clients.find(client => client.url.startsWith(self.registration.scope));
+    if (open) return open.navigate(target).then(client => client?.focus());
+    return self.clients.openWindow(target);
+  }));
+});
+
+self.addEventListener("fetch", event => {
+  const request = event.request;
+  if (request.method !== "GET" || !APP_SHELL.has(request.url)) return;
+
+  event.respondWith(
+    fetch(request)
+      .then(async response => {
+        if (response.ok) {
+          const cache = await caches.open(CACHE_NAME);
+          await cache.put(request, response.clone());
+        }
+        return response;
+      })
+      .catch(async () => {
+        const cached = await caches.match(request);
+        if (cached) return cached;
+        if (request.mode === "navigate") {
+          const appShell = await caches.match(new URL("./index.html", self.registration.scope).href);
+          if (appShell) return appShell;
+        }
+        return new Response("", { status: 503, statusText: "Unavailable offline" });
+      }),
+  );
+});

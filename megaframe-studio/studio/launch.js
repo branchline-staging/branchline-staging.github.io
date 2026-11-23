@@ -4,7 +4,7 @@
   const config = window.MEGAFRAME_STUDIO_PRIVATE_CONFIG || {};
   const status = document.getElementById("status");
   const mount = document.getElementById("mount");
-  const portal = "/";
+  const portal = "https://branchline-staging.github.io/first-megasaver-ptg/studios/";
   let active = false, checking = false, expired = false, expiry = 0;
   let interval = null, deadline = null, warned = false;
   let draftPort = null, keyPair = null, proof = null;

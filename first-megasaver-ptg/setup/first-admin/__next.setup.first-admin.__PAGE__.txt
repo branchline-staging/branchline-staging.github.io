@@ -1,0 +1,6 @@
+1:"$Sreact.fragment"
+2:I[59020,["/first-megasaver-ptg/_next/static/chunks/8a50bd729753d536.js","/first-megasaver-ptg/_next/static/chunks/517d1551640e3bf9.js","/first-megasaver-ptg/_next/static/chunks/bc03c64bf9c78e4b.js","/first-megasaver-ptg/_next/static/chunks/bc0b6eca3719e0c6.js"],"default"]
+3:I[97367,["/first-megasaver-ptg/_next/static/chunks/ff1a16fafef87110.js","/first-megasaver-ptg/_next/static/chunks/247eb132b7f7b574.js"],"OutletBoundary"]
+4:"$Sreact.suspense"
+0:{"buildId":"pUfL05D9Fs2o2U-S302HJ","rsc":["$","$1","c",{"children":[["$","main",null,{"className":"auth-shell","children":["$","$L2",null,{}]}],[["$","script","script-0",{"src":"/first-megasaver-ptg/_next/static/chunks/bc0b6eca3719e0c6.js","async":true}]],["$","$L3",null,{"children":["$","$4",null,{"name":"Next.MetadataOutlet","children":"$@5"}]}]]}],"loading":null,"isPartial":false}
+5:null

@@ -1,0 +1,21 @@
+{
+  "id": "/first-megasaver-ptg/",
+  "name": "Branchline Price Tag Generator",
+  "short_name": "Branchline PTG",
+  "description": "Branchline Price Tag Generator",
+  "start_url": "/first-megasaver-ptg/login/",
+  "scope": "/first-megasaver-ptg/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f4f7fb",
+  "theme_color": "#123b6b",
+  "categories": ["business", "productivity"],
+  "icons": [
+    {
+      "src": "/first-megasaver-ptg/icons/ptg-app-dark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

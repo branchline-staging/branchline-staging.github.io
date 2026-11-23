@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const config = Object.freeze({});
+  const config = window.BRANCHLINE_SUPABASE_CONFIG;
   const authScreen = document.querySelector("#auth-screen");
   const authMessage = document.querySelector("#auth-message");
   const configWarning = document.querySelector("#auth-config-warning");
@@ -50,6 +50,7 @@
   let workspaceWrites = 0;
   let currentSession = null;
   let currentProfile = null;
+  const calendarNoticesShown = new Set();
   let liveData = null;
   let activePage = "overview";
   let loadSequence = 0;
@@ -221,6 +222,7 @@
   }
 
   function clearWorkspace() {
+    document.querySelector("[data-calendar-daily-notices]")?.remove();
     parkAccountControls();
     loadSequence += 1;
     currentSession = null;
@@ -541,7 +543,7 @@
         renderConnected();
         autoRegisterPush();
         if (passwordRecoveryPending && !demoStore) openPasswordModal(true);
-        else await showInventoryReminder();
+        else await showOpeningReminders(sequence);
         return;
       }
       const isPsUser = profile.role === "ps";
@@ -741,10 +743,7 @@
         showPacePopup();
         autoRegisterPush();
       } else autoRegisterPush();
-      if (!passwordRecoveryPending) {
-        await showInventoryReminder();
-        showDailyCalendarEventNotices();
-      }
+      if (!passwordRecoveryPending) await showOpeningReminders(sequence);
     } catch (error) {
       if (sequence !== loadSequence) return;
       console.error("Unable to load the authenticated Branchline workspace.", error);
@@ -753,6 +752,13 @@
         document.querySelector("#reset-saved-demo").hidden = false;
       }
       showProfileError(error.message || "Unable to load your workspace. Try again or contact your administrator.");
+    }
+  }
+
+  async function showOpeningReminders(sequence) {
+    await showInventoryReminder();
+    if (sequence === loadSequence && currentSession && !passwordRecoveryPending) {
+      showOpeningCalendarEventNotices();
     }
   }
 
@@ -2159,11 +2165,10 @@
     return { events: events.data, adjustments: adjustments.data };
   }
 
-  // On-app-opening daily event notices; this is not a remote push or an ad.
   // Only events already accessible to this authenticated account can appear.
-  function showDailyCalendarEventNotices() {
+  function showOpeningCalendarEventNotices() {
     const profile = currentProfile, context = liveData?.calendar;
-    if (!profile?.id || !context || context.error || context.demo || demoStore) return;
+    if (!profile?.id || calendarNoticesShown.has(profile.id) || !context || context.error || context.demo || demoStore) return;
     const date = localISODate();
     const ids = scopeBranchIds();
     const events = (context.events || []).filter(row => !row.cancelled_at
@@ -2171,11 +2176,6 @@
       && (!row.branch_ids?.length || row.branch_ids.some(id => ids.has(id))))
       .sort((a, b) => String(a.title || "").localeCompare(String(b.title || "")));
     if (!events.length) return;
-    const storageKey = "branchline:calendar-notices:" + profile.id + ":" + date;
-    try { if (localStorage.getItem(storageKey) === "shown") return; }
-    catch { /* Restricted storage: still show this login's notices. */ }
-    try { localStorage.setItem(storageKey, "shown"); }
-    catch { /* Continue without persistence when storage is blocked. */ }
     let index = 0;
     const overlay = document.createElement("div");
     overlay.className = "dlg-backdrop calendar-daily-notice-backdrop";
@@ -2217,6 +2217,7 @@
       showNext();
     });
     document.body.append(overlay);
+    calendarNoticesShown.add(profile.id);
     showNext();
   }
 
@@ -10078,6 +10079,15 @@
   } else {
     document.querySelector("#login-form").querySelectorAll("input,button").forEach(control => { control.disabled = true; });
     configWarning.hidden = false;
-    configWarning.textContent = "Sample data only. PTG and the Studios use staging sign-in.";
+    configWarning.textContent = window.supabase?.createClient
+      ? "Supabase is not configured yet. Add the project's public publishable key to supabase-config.js. Never use a secret/service-role key here."
+      : "The Supabase client could not load. Connect to the internet, reload the app, or use the sample demo.";
+    setAuthMessage("Live sign-in is not configured yet.", true);
+  }
+
+  if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1")) {
+    window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(error => {
+      console.error("Unable to register the Branchline service worker.", error);
+    }));
   }
 })();

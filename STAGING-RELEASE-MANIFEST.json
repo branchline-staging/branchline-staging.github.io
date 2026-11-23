@@ -1,0 +1,14 @@
+{
+  "host": "branchline-staging.github.io",
+  "supabase": "rlfdvmiqkbitetatxkju",
+  "files": 303,
+  "rootPreserved": true,
+  "privateEditorsPublished": false,
+  "sha256": {
+    "index.html": "645b4a37a9296bf5cb4e2fa32bccf845c3d2d9d2d1eb56ced2fd431b846d3cc7",
+    "sales-tracker/index.html": "5e2d84b089cd740e61c0bbfbccd6b2fca61d12f3e7af69e979e2306a51cf947c",
+    "first-megasaver-ptg/studios/index.html": "6097c077aad2c9587195427ec82271d27c6ccbf87503b9c77a22c8059086d8bd",
+    "megaframe-studio/studio/index.html": "3ae79eaa8812cf71139f3285f75ef00fa170fe2b335bad78f82dcec3f1b746b0",
+    "flyer-studio/studio/index.html": "ef165878d39b872d68901189d17b98816ded59d4317244417f9abc6d8e7a51c0"
+  }
+}
