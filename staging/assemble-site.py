@@ -39,6 +39,10 @@ assert "branchline-staging.github.io/first-megasaver-ptg/studios/" in (dest/"bra
 ptg=parent/"first-megasaver-ptg"/"out"
 assert (ptg/"studios/index.html").exists()
 shutil.copytree(ptg,out/"first-megasaver-ptg")
+# Never redistribute old unsigned Windows installers through the staging test site.
+for item in (out/"first-megasaver-ptg").rglob("*"):
+ if item.is_file() and item.suffix.lower() in (".exe",".msi",".msix",".appx"):
+  item.unlink()
 assert (out/"first-megasaver-ptg/icons/official/data-desk.png").exists()
 for app,legacy in (("megaframe-studio","vmyoxoiygfcecgkbavgg"),("flyer-studio","tzklsscoiwnmeantcefw")):
  origin=parent/app/"staging/stage-pages-cutover/studio"
