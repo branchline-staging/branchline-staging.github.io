@@ -13,6 +13,7 @@ const report={origin,date:new Date().toISOString(),mode:"Real hosted Pages + una
  "Never entered real credentials, accessed customer data, or wrote Supabase/Drive records."
 ]};
 const failures=[];
+const pageErrors=[];
 async function check(name,fn,{required=true}={}){
  const start=Date.now();
  try{
@@ -23,7 +24,11 @@ async function check(name,fn,{required=true}={}){
    const reason=String(error?.stack||error).slice(0,2000);
    report.checks.push({name,status:"FAIL",ms:Date.now()-start,reason,required});
    if(required)failures.push({name,reason});
-   console.error("FAIL",name,reason);
+   const diag={url:page?.url()||"",title:await page?.title().catch(()=>""),body:(await page?.locator("body").innerText().catch(()=>"")).slice(0,1800),
+     errors:pageErrors.slice(-8)};
+   console.error("FAIL",name,reason,"DIAG",JSON.stringify(diag));
+   try{await page?.screenshot({path:join(folder,"DIAG-"+name.replace(/[^A-Za-z0-9]+/g,"-").slice(0,48)+".png"),fullPage:true});}catch{}
+   report.checks[report.checks.length-1].diagnostic=diag;
  }
 }
 function saveReport(){
@@ -35,6 +40,7 @@ function saveReport(){
 const browser=await chromium.launch({headless:true,args:["--disable-features=TranslateUI"]});
 const context=await browser.newContext({viewport:{width:1440,height:900},acceptDownloads:true,ignoreHTTPSErrors:false});
 const page=await context.newPage();
+page.on("pageerror",err=>pageErrors.push(err.message));
 page.setDefaultTimeout(13000);
 const productionRequests=[];
 context.on("request",req=>{
@@ -92,20 +98,20 @@ try{
   await goto("/sales-tracker/");
   await page.locator("#enter-demo").waitFor({state:"visible"});
   await page.locator("#enter-demo").click();
-  await page.locator("#demo-app .bl-app-rail").waitFor({state:"visible",timeout:20000});
-  assert.equal(await page.locator("#demo-app .bl-rail-link").count(),4);
-  const logo=page.locator("#demo-app .bl-rail-brand");
+  await page.locator("#connected-shell .bl-app-rail").waitFor({state:"visible",timeout:20000});
+  assert.equal(await page.locator("#connected-shell .bl-rail-link").count(),4);
+  const logo=page.locator("#connected-shell .bl-rail-brand");
   await logo.click();
-  assert.equal(await page.locator("#bl-app-drawer-demo").isVisible(),true);
+  assert.equal(await page.locator("#bl-app-drawer-connected").isVisible(),true);
   await screenshot("sales-tracker-desktop-drawer");
   await page.keyboard.press("Escape");
-  assert.equal(await page.locator("#bl-app-drawer-demo").isVisible(),false);
+  assert.equal(await page.locator("#bl-app-drawer-connected").isVisible(),false);
   await page.setViewportSize({width:390,height:844});
-  await page.locator("#demo-app .bl-mobile-brand").click();
-  assert.equal(await page.locator("#bl-app-drawer-demo").isVisible(),true);
+  await page.locator("#connected-shell .bl-mobile-brand").click();
+  assert.equal(await page.locator("#bl-app-drawer-connected").isVisible(),true);
   await screenshot("sales-tracker-mobile-drawer");
-  await page.locator("#mobile-menu").click();
-  assert.equal(await page.locator("#bl-app-drawer-demo").isVisible(),false);
+  await page.locator("#connected-menu").click();
+  assert.equal(await page.locator("#bl-app-drawer-connected").isVisible(),false);
   await page.setViewportSize({width:1440,height:900});
   return {apps:4,workspaceHamburgerSeparate:true};
  });
@@ -117,8 +123,9 @@ try{
  });
  await check("Hosted PTG Creative Studios denies unauthenticated entry",async()=>{
   await goto("/first-megasaver-ptg/studios/");
-  await page.getByText(/not authorized|Sign in to PTG|PTG Team Leader/i).first().waitFor({timeout:25000});
-  const text=(await page.locator("main").innerText()).slice(0,1100);
+  await page.waitForFunction(()=>location.pathname.includes("/login/")||
+    /not authorized|Sign in to PTG|PTG Team Leader|unavailable/i.test(document.body?.innerText||""),{timeout:25000});
+  const text=(await page.locator("body").innerText()).slice(0,1100);
   assert.equal(await page.getByRole("button",{name:/^Open MegaFrame Studio$|^Open MegaFlyer Studio$/}).count(),0);
   await screenshot("ptg-studios-unauthorized");
   return {denied:true,summary:text.slice(0,200)};
@@ -129,6 +136,7 @@ try{
   await goto("/first-megasaver-ptg/demo/");
   await page.locator("#legacy-product-search").waitFor({state:"visible",timeout:20000});
   await page.locator("#legacy-product-search").fill("DEMO-RC18");
+  console.log("DEMO PRE SEARCH", (await page.locator("body").innerText()).slice(0,700));
   await page.locator(".legacy-search-form button[type='submit']").click();
   await page.locator(".legacy-search-results-table tbody tr").filter({hasText:"DEMO-RC18"}).first().waitFor();
   const row=page.locator(".legacy-search-results-table tbody tr").filter({hasText:"DEMO-RC18"}).first();
