@@ -234,47 +234,9 @@ async function open(){
     return;
    }
    if(message.action==='product-photo'){
-    const actions=new Set(['permissions','resolve','search','image','upload','replace','setPrimary','remove']);
-    try{
-     if(typeof message.payload!=='string'||message.payload.length>3500000)
-      throw Error('Invalid product photo request');
-     const payload=JSON.parse(message.payload);
-     if(!payload||typeof payload!=='object'||Array.isArray(payload)||
-        !actions.has(payload.action)||Object.hasOwn(payload,'studioProof'))
-      throw Error('Invalid photo action');
-     // The P-256 signer remains in this parent. An opaque editor never sees
-     // either a PTG bearer or the one-use proof. Every photo call independently
-     // revalidates PTG account/role/revocation through the server-only gateway.
-     const photoResult=await withProof(async()=>{
-      if(!active||Date.now()>=expiresAt)throw Error('Session expired');
-      const signed=await signedRequest();
-      const res=await fetch('/staging-photo-unavailable',{
-       method:'POST',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',
-       headers:{'Content-Type':'application/json',apikey:cfg.publishableKey||''},
-       body:JSON.stringify({...payload,studioProof:{
-        sessionId:signed.sessionId,challenge:signed.challenge,signature:signed.signature
-       }})
-      });
-      const data=await res.json().catch(()=>null);
-      // Proofs rotate even when storage operations fail. Missing rotation is
-      // an authorization failure, not a signal to reuse a spent challenge.
-      if(!data?.studioProof||!validSession({...data.studioProof,ok:true}))
-       throw Error('PTG proof was rejected');
-      if(!active)throw Error('Studio locked');
-      recordAuth({...data.studioProof,ok:true});
-      return {ok:res.ok,data};
-     });
-     if(!active||Date.now()>=expiresAt)return;
-     if(photoResult.ok)channel.port1.postMessage({id:message.id,ok:true,
-      value:photoResult.data.result});
-     else channel.port1.postMessage({id:message.id,ok:false,
-      error:typeof photoResult.data?.error==='string'?photoResult.data.error:
-       'Product photo access denied.'});
-    }catch{
-     // An unverifiable proof immediately locks the protected editor. Do not
-     // silently fall back to ambient browser tokens or Origin:null CORS.
-     if(active)lock('PTG photo authorization expired or was revoked. Reopen the Studio from PTG.');
-    }
+    // This isolated staging site has no product-photo service.
+    channel.port1.postMessage({id:message.id,ok:false,
+      error:'The product photo library is unavailable in staging.'});
     return;
    }
    if(!['read','write','delete'].includes(message.action)||
