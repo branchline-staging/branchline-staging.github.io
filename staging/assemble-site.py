@@ -33,6 +33,7 @@ for item in dest.rglob("*"):
  if not item.is_file() or item.suffix not in (".html",".js",".mjs",".css",".json",".webmanifest",".svg"):continue
  body=item.read_text(errors="replace")
  revised=body.replace("https://kzamora19.github.io/branchline/","https://branchline-staging.github.io/sales-tracker/").replace("https://kzamora19.github.io","https://branchline-staging.github.io")
+ for project_id in ("psoopubvdpwztzkdyifa","agknxlowackphvwyvxge","vmyoxoiygfcecgkbavgg","tzklsscoiwnmeantcefw"):revised=revised.replace(project_id,stage)
  if revised!=body:item.write_text(revised)
 assert "branchline-staging.github.io/first-megasaver-ptg/studios/" in (dest/"branchline-applications.js").read_text()
 ptg=parent/"first-megasaver-ptg"/"out"
