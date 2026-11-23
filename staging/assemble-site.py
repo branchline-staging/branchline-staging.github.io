@@ -74,6 +74,18 @@ for app,legacy in (("megaframe-studio","vmyoxoiygfcecgkbavgg"),("flyer-studio","
   original=javascript.read_text()
   adjusted=original.replace("https://kzamora19.github.io/first-megasaver-ptg/studios/","https://branchline-staging.github.io/first-megasaver-ptg/studios/")
   if adjusted!=original:javascript.write_text(adjusted)
+ if app=="flyer-studio":
+  # The isolated project has no photo gateway. Deny only that feature and
+  # leave the signed editor session and encrypted backup operations intact.
+  launcher=target/"launch.js"
+  js=launcher.read_text()
+  photo_start=js.index("   if(message.action==='product-photo'){")
+  photo_end=js.index("   if(!['read','write','delete']",photo_start)
+  assert "flyer-product-photos" in js[photo_start:photo_end]
+  launcher.write_text(js[:photo_start]+"   if(message.action==='product-photo'){\n    channel.port1.postMessage({id:message.id,ok:false,\n      error:'The product photo library is unavailable in staging.'});\n    return;\n   }\n"+js[photo_end:])
+  page=p.read_text()
+  assert 'src="./launch.js"' in page
+  p.write_text(page.replace('src="./launch.js"','src="./launch.js?v=isolated-photo-v2"',1))
 forbidden=["psoopubvdpwztzkdyifa","agknxlowackphvwyvxge","vmyoxoiygfcecgkbavgg","tzklsscoiwnmeantcefw","https://kzamora19.github.io","https://first-megasaver-ptg.vercel.app"]
 n=0
 for p in out.rglob("*"):
