@@ -1,0 +1,10083 @@
+(() => {
+  "use strict";
+
+  const config = window.BRANCHLINE_SUPABASE_CONFIG;
+  const authScreen = document.querySelector("#auth-screen");
+  const authMessage = document.querySelector("#auth-message");
+  const configWarning = document.querySelector("#auth-config-warning");
+  const demoApp = document.querySelector("#demo-app");
+  const connectedShell = document.querySelector("#connected-shell");
+  const connectedContent = document.querySelector("#connected-content");
+  const connectedNav = document.querySelector("#connected-nav");
+  const connectedSidebar = document.querySelector(".connected-sidebar");
+  const loginForm = document.querySelector("#login-form");
+  const roleLabels = {
+    ps: "Product Specialist",
+    manager: "Branch Manager",
+    district_manager: "District Manager",
+    admin: "Administrator",
+    inventory_controller: "Inventory Controller",
+    stock_custodian: "Stock Custodian",
+  };
+  const roleRank = { admin: 0, district_manager: 1, manager: 2, inventory_controller: 3, stock_custodian: 4, ps: 5 };
+  const pageLabels = {
+    overview: "Overview",
+    sales: "Sales",
+    analytics: "Analytics",
+    targets: "Targets",
+    products: "Products",
+    customers: "Customer Master",
+    users: "People & access",
+    inventory: "Inventory",
+    settings: "Settings",
+    apps: "Applications",
+  };
+  const rolePages = {
+    ps: ["overview", "sales", "analytics", "inventory", "apps", "settings"],
+    manager: ["overview", "sales", "analytics", "targets", "products", "customers", "inventory", "apps", "settings"],
+    district_manager: ["overview", "sales", "analytics", "targets", "products", "customers", "inventory", "apps", "settings"],
+    admin: ["overview", "sales", "analytics", "targets", "products", "customers", "users", "inventory", "apps", "settings"],
+    inventory_controller: ["inventory", "apps", "settings"],
+    stock_custodian: ["inventory", "apps", "settings"],
+  };
+  const PAGE_SIZE = 10;
+  const PERCENT_DECIMALS = 4;
+  const PIE_COLORS = ["#355ee8", "#16a34a", "#f59e0b", "#ef4444", "#8b5cf6", "#0ea5e9", "#64748b"];
+
+  let client = null;
+  let liveClient = null;
+  let demoStore = null;
+  let workspaceWrites = 0;
+  let currentSession = null;
+  let currentProfile = null;
+  let liveData = null;
+  let activePage = "overview";
+  let loadSequence = 0;
+  let resultsView = null;
+  const ui = { period: "month", month: "", district: "", branch: "", date: "", search: "", rankBrand: "", rankCategory: "", rankSub: "",   anDim: "brand", anBasis: "all", brandSort: "sales", logBranch: "", logFrom: "", logTo: "", rankBranch: "", brandBranch: "", bpMix: "", bpYear: "", dsMonth: "", dsYear: "", dsBranch: "", pages: {}, sort: {}, columnFilters: {} };
+  const productSelection = new Set();
+  const universalPages = new Set(["overview", "sales", "analytics", "targets"]);
+  const savedFilterKeys = ["district", "branch", "period", "month", "date", "anRange", "anBasis", "logFrom", "logTo", "rankBrand", "rankCategory", "rankSub", "anDim", "salesBasis", "dsMonth", "dsYear", "yrYear",
+    "inventoryForecastFrom", "inventoryForecastTo", "inventoryForecastMonth", ...["pdMix", "pdTrend", "pdTop", "pdAttn"].flatMap(key => [key, `${key}M`, `${key}Y`, `${key}Date`])];
+  let filterAccount = "";
+
+  function filterStorageKey() {
+    return `branchline-filters-v1:${demoStore ? "demo" : "live"}:${currentProfile.dealer_id}:${currentProfile.id}`;
+  }
+
+  function restoreAccountFilters() {
+    const key = filterStorageKey();
+    if (filterAccount === key) return;
+    resetUi();
+    for (const name of savedFilterKeys) {
+      if (!["period", "month", "date", "district", "branch", "anRange", "anBasis"].includes(name)) ui[name] = "";
+    }
+    ui.anBasis = "all";
+    filterAccount = key;
+    try {
+      const saved = JSON.parse(localStorage.getItem(key) || "{}");
+      for (const name of savedFilterKeys) {
+        if (typeof saved?.[name] === "string") ui[name] = saved[name];
+      }
+    } catch (error) {
+      console.warn("Unable to restore saved Branchline filters; using current defaults.", error);
+    }
+    if (!["month", "year", "day"].includes(ui.period)) ui.period = "month";
+    if (!["price", "srp"].includes(ui.salesBasis)) ui.salesBasis = "price";
+    if (!["month", "all"].includes(ui.anRange)) ui.anRange = "month";
+    if (!Object.hasOwn(window.BranchlineAnalytics.RULES, ui.anBasis)) ui.anBasis = "all";
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(ui.month)) ui.month = currentMonth();
+    for (const name of ["date", "logFrom", "logTo", "inventoryForecastFrom", "inventoryForecastTo"]) {
+      const time = Date.parse(ui[name]);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(ui[name]) || !Number.isFinite(time) || new Date(time).toISOString().slice(0, 10) !== ui[name]) ui[name] = "";
+    }
+    if (ui.logFrom && ui.logTo && ui.logFrom > ui.logTo) ui.logFrom = ui.logTo = "";
+    if (ui.inventoryForecastFrom && ui.inventoryForecastTo && ui.inventoryForecastFrom > ui.inventoryForecastTo) ui.inventoryForecastFrom = ui.inventoryForecastTo = "";
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(ui.inventoryForecastMonth || "")) ui.inventoryForecastMonth = "";
+  }
+
+  function sanitizeAccountScope() {
+    if (!liveData.districts.some(row => row.id === ui.district)) ui.district = "";
+    if (!liveData.branches.some(row => row.id === ui.branch && (!ui.district || row.district_id === ui.district))) ui.branch = "";
+    if (currentProfile.role === "ps") {
+      ui.district = currentProfile.district_id || "";
+      ui.branch = currentProfile.branch_id || "";
+    }
+  }
+
+  function saveAccountFilters() {
+    if (!currentProfile) return;
+    try {
+      localStorage.setItem(filterStorageKey(), JSON.stringify(Object.fromEntries(savedFilterKeys.map(key => [key, ui[key] || ""]))));
+    } catch (error) {
+      console.warn("Unable to save Branchline filter preferences on this device.", error);
+    }
+  }
+  let productsFiltered = [];
+  let salesLogExport = null;
+  let walkInDailyCtx = null;
+  let pacePopupShown = false;
+  let passwordRecoveryPending = location.hash.includes("type=recovery");
+  const inventoryOnly = () => ["inventory_controller", "stock_custodian"].includes(currentProfile?.role);
+  const managesInventory = () => currentProfile?.role && currentProfile.role !== "ps";
+  let inventoryReminderChecked = "";
+  const recoveryLinkFailed = /(?:^#|&)(?:error_code|error_description)=/.test(location.hash);
+
+  // A test account (name or login starting with "Test", e.g. Test_ps) is never counted as a Product Specialist and its sales never count.
+  const isTestProfile = profile => /^\s*test([^a-z]|$)/i.test(profile?.full_name || "") || /^\s*test([^a-z]|$)/i.test(profile?.login_id || "");
+  function isTestSale(sale, testPsIds) {
+    const test = value => /^\s*test(?![a-z])/i.test(String(value || ""));
+    return test(sale.customer_name) || test(sale.invoice_number) || Boolean(testPsIds?.has(sale.ps_id));
+  }
+  function setAuthMessage(message, isError = false) {
+    authMessage.textContent = message;
+    authMessage.classList.toggle("error", isError);
+  }
+
+  function escapeHTML(value) {
+    return String(value ?? "").replace(/[&<>"']/g, char => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    })[char]);
+  }
+
+  function formatMoney(value) {
+    const amount = Number(value);
+    return `₱${(Number.isFinite(amount) ? amount : 0).toLocaleString("en-PH", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
+  }
+
+  const parseCurrency = window.parseCurrency;
+  const formatCurrencyInput = window.formatCurrencyInput;
+
+  function localISODate(date = new Date()) {
+    if (demoStore) return window.BranchlineDemo.philippineDate(date);
+    const pad = number => String(number).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  }
+
+  function currentMonth() {
+    return localISODate().slice(0, 7);
+  }
+
+  function monthLabel(month) {
+    return new Date(`${month}-01T12:00:00`).toLocaleDateString("en", { month: "long", year: "numeric" });
+  }
+
+  const naturalOrder = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+  function natural(a, b) {
+    return naturalOrder.compare(String(a ?? ""), String(b ?? ""));
+  }
+
+  function percent(actual, target, decimals = PERCENT_DECIMALS) {
+    return target > 0 ? `${((actual / target) * 100).toFixed(decimals)}%` : "—";
+  }
+
+  function rolePageAllowed(page) {
+    return (rolePages[currentProfile?.role] || []).includes(page);
+  }
+
+  function connectedUserLabel() {
+    const name = currentProfile?.full_name || currentSession?.user?.email || "Signed-in user";
+    const code = currentProfile?.role === "ps" ? String(currentProfile.salesperson_code || "").trim() : "";
+    return code ? `${name} - ${code}` : name;
+  }
+
+  function resetUi() {
+    ui.inventoryProductSearch = "";
+    ui.inventoryProductDetails = false;
+    ui.salesBasis = "price";
+    ui.filtersOpen = false;
+    ui.period = "month";
+    ui.anRange = "month";
+    ui.month = "";
+    ui.district = "";
+    ui.branch = "";
+    ui.date = "";
+    ui.search = "";
+    ui.logBranch = "";
+    ui.logFrom = "";
+    ui.logTo = "";
+    ui.dsBranch = "";
+    ui.invView = "";
+    ui.invBrand = "";
+    ui.invAvailable = false;
+    ui.invAge = "90";
+    ui.pages = {};
+    ui.sort = {};
+    ui.columnFilters = {};
+    productSelection.clear();
+  }
+
+  function setWorkspaceMode(mode) {
+    authScreen.hidden = true;
+    connectedShell.hidden = mode !== "connected";
+    demoApp.hidden = mode !== "demo";
+  }
+
+  function clearWorkspace() {
+    parkAccountControls();
+    loadSequence += 1;
+    currentSession = null;
+    currentProfile = null;
+    liveData = null;
+    resultsView = null;
+    activePage = "overview";
+    filterAccount = "";
+    resetUi();
+    pacePopupShown = false;
+    document.querySelector(".edge-glow")?.remove();
+    connectedSidebar.classList.remove("open");
+    connectedShell.hidden = true;
+    demoApp.hidden = true;
+    authScreen.hidden = false;
+    setAuthMessage("");
+    loginForm.reset();
+    loginForm.elements.password.type = "password";
+    applyRememberedLogin();
+  }
+
+  // "Remember me": the session lives in localStorage (kept across restarts) or, when unticked, sessionStorage (ends with the tab or app).
+  const REMEMBER_KEY = "branchline-remember";
+  const LAST_LOGIN_KEY = "branchline-last-login";
+  let signingInRemembered = null;
+  const rememberMe = () => localStorage.getItem(REMEMBER_KEY) !== "0";
+  const authStorage = {
+    getItem: key => sessionStorage.getItem(key) ?? localStorage.getItem(key),
+    setItem: (key, value) => {
+      const durable = signingInRemembered ?? (sessionStorage.getItem(key) === null &&
+        (localStorage.getItem(key) !== null || rememberMe()));
+      const keep = durable ? localStorage : sessionStorage;
+      const drop = durable ? sessionStorage : localStorage;
+      keep.setItem(key, value);
+      drop.removeItem(key);
+    },
+    removeItem: key => {
+      localStorage.removeItem(key);
+      sessionStorage.removeItem(key);
+    },
+  };
+
+  function applyRememberedLogin() {
+    const box = document.querySelector("#remember-me");
+    if (!box) return;
+    box.checked = rememberMe();
+    const last = localStorage.getItem(LAST_LOGIN_KEY);
+    if (box.checked && last && loginForm.elements.email) loginForm.elements.email.value = last;
+  }
+
+  function showProfileError(message) {
+    currentProfile = null;
+    liveData = null;
+    resultsView = null;
+    connectedShell.hidden = true;
+    authScreen.hidden = false;
+    setAuthMessage(message, true);
+  }
+
+  function checkResult(result, description) {
+    if (result.error) {
+      throw new Error(`${description}: ${result.error.message}`);
+    }
+    return result.data;
+  }
+
+  function contributionLoadMessage(error) {
+    if (["PGRST202", "42883"].includes(error.code)) {
+      return "Brand contribution needs a server database update. Ask your administrator to apply the brand contribution migration, then reload.";
+    }
+    if (error.code === "42501") {
+      return "Access to brand contribution was denied. Ask your administrator to check the function permissions.";
+    }
+    return "Brand contribution could not load. Check your connection and reload. If it continues, ask your administrator to check the chart request.";
+  }
+
+  // PostgREST caps each response at 1000 rows, so read larger tables page by page.
+  async function fetchPagedRows(page) {
+    const first = await page(0);
+    if (first.error || first.data.length < 1000) return first;
+    const rows = [...first.data];
+    for (let from = 1000; ; from += 3000) {
+      const batch = await Promise.all([from, from + 1000, from + 2000].map(page));
+      const failed = batch.find(result => result.error);
+      if (failed) return { data: null, error: failed.error };
+      for (const result of batch) {
+        rows.push(...result.data);
+        if (result.data.length < 1000) return { data: rows, error: null };
+      }
+    }
+  }
+
+  async function fetchAllFrom(client, table, columns, orders, refine) {
+    return fetchPagedRows(from => {
+      let query = client.from(table).select(columns);
+      if (refine) query = refine(query);
+      orders.forEach(([column, ascending]) => { query = query.order(column, { ascending }); });
+      return query.range(from, from + 999);
+    });
+  }
+
+  async function fetchInventoryRpc(name, orders, inventoryClient) {
+    const result = await fetchPagedRows(offset => {
+      let query = inventoryClient.rpc(name);
+      orders.forEach(column => { query = query.order(column); });
+      return query.range(offset, offset + 999);
+    });
+    if (result.error) {
+      const message = new Error(`${name}: ${result.error.message}`);
+      message.code = result.error.code;
+      throw message;
+    }
+    return result.data;
+  }
+
+  async function loadInventoryData(inventoryClient, onProgress = () => {}) {
+    const fetchAll = (...args) => fetchAllFrom(inventoryClient, ...args);
+    const requests = [
+      fetchInventoryRpc("inventory_catalog", ["branch_id", "barcode"], inventoryClient),
+      fetchAll("inventory_stock", "*", [["branch_id", true], ["barcode", true]]),
+      fetchAll("inventory_serials", "*", [["branch_id", true], ["barcode", true], ["serial", true]]),
+      fetchAll("inventory_snapshots", "*", [["imported_at", false], ["id", true]]),
+      fetchAll("inventory_transfers", "*", [["dispatched_at", false], ["id", true]]),
+      fetchAll("inventory_events", "*", [["created_at", false], ["id", true]]),
+      managesInventory() ? fetchInventoryRpc("inventory_destinations", ["id"], inventoryClient) : [],
+      currentProfile.role === "admin" ? fetchAll("inventory_branch_users", "*", [["user_id", true], ["branch_id", true]]) : { data: [], error: null },
+      fetchAll("inventory_transfer_batches", "*", [["requested_at", false], ["id", true]]),
+      fetchInventoryRpc("inventory_sales_serials", ["branch_id", "barcode", "serial"], inventoryClient),
+      ["ps", "manager", "district_manager", "admin"].includes(currentProfile.role)
+        ? fetchAll("products", "branch_id,barcode,srp", [["branch_id", true], ["barcode", true]], query => query.eq("active", true))
+        : { data: [], error: null },
+    ];
+    let completed = 0;
+    const [catalog, stock, serials, snapshots, transfers, events, destinations, assignments, batches, salesSerials, prices] = await Promise.all(
+      requests.map(request => Promise.resolve(request).then(result => {
+        onProgress(++completed / requests.length);
+        return result;
+      })));
+    const priceMap = new Map(checkResult(prices, "Unable to load inventory SRP prices").map(row => [`${row.branch_id}\0${row.barcode}`, row.srp]));
+    return {
+      inventoryCatalog: catalog.map(row => ({ ...row, srp: priceMap.get(`${row.branch_id}\0${row.barcode}`) ?? null })),
+      inventoryStock: checkResult(stock, "Unable to load stock"),
+      inventorySerials: checkResult(serials, "Unable to load serials"), inventorySnapshots: checkResult(snapshots, "Unable to load snapshots"),
+      inventoryTransfers: checkResult(transfers, "Unable to load transfers"), inventoryEvents: checkResult(events, "Unable to load inventory history"),
+      inventoryDestinations: destinations, inventoryAssignments: checkResult(assignments, "Unable to load inventory assignments"),
+      inventoryTransferBatches: checkResult(batches, "Unable to load transfer approvals"),
+      inventorySalesSerials: salesSerials,
+    };
+  }
+
+  async function refreshInventoryData({ refreshProducts = false } = {}) {
+    const capturedClient = client, profileId = currentProfile.id;
+    const [inventory, branches, products] = await Promise.all([
+      loadInventoryData(capturedClient),
+      fetchAllFrom(capturedClient, "branches", "id,name,district_id,code,transfer_sequence", [["id", true]]),
+      refreshProducts && !inventoryOnly()
+        ? fetchAllFrom(capturedClient, "products", "id,branch_id,barcode,model_description,brand,category,sub_category,active,srp",
+          [["model_description",true],["id",true]],query => query.eq("active",true))
+        : null,
+    ]);
+    if (client !== capturedClient || currentProfile?.id !== profileId) throw new Error("Account changed; reload Inventory.");
+    const productRows = products ? normalizeProductRows(checkResult(products, "Unable to reload received products")) : liveData.products;
+    liveData = { ...liveData, ...inventory, inventoryError:null, products:productRows,
+      branches:checkResult(branches, "Unable to reload inventory branches").map(item => ({...item,name:titleCase(item.name)})) };
+    renderConnected();
+  }
+
+  async function sendTransferPush() {
+    if (demoStore) return;
+    try {
+      const result = await client.functions.invoke("transfer-push", { body: {} });
+      if (result.error || result.data?.failed) throw result.error || new Error("Some device notifications failed.");
+    } catch (error) {
+      console.error("Transfer saved, but device notification delivery failed.", error);
+      connectedContent.insertAdjacentHTML("afterbegin", '<p class="connected-error" role="alert">Transfer saved. Device push could not be delivered; in-app approvals remain available. Ask Admin to check transfer-push deployment/cron.</p>');
+    }
+  }
+
+  async function refreshSavedTransfer(options) {
+    try {
+      await refreshInventoryData(options);
+      return "";
+    } catch (error) {
+      console.error("Transfer action saved, but inventory refresh failed.", error);
+      return `<p class="connected-error" role="alert">Your transfer action was saved. Inventory could not refresh: ${escapeHTML(friendlyError(error))}. Reload to see the saved transfer; do not submit it again.</p>`;
+    }
+  }
+
+  // Standard letter casing for typed names: only plain all-caps or all-lowercase words are changed,
+  // so model codes (HFSWD-1900BL, 128GB) and mixed-case names (iPhone) are left alone.
+  function titleCase(text) {
+    if (text == null) return text;
+    return String(text).trim().replace(/\s+/g, " ").split(" ").map(word => {
+      if (/\d/.test(word)) return word;
+      if (word !== word.toUpperCase() && word !== word.toLowerCase()) return word;
+      return word.toLowerCase().replace(/(^|[-'/(])([a-z])/g, (_, lead, letter) => lead + letter.toUpperCase());
+    }).join(" ");
+  }
+
+  function uppercaseEntry(text) {
+    return String(text ?? "").trim().toUpperCase();
+  }
+
+  function normalizeProductRows(rows) {
+    const labels = new Map();
+    const normalize = value => {
+      if (!labels.has(value)) labels.set(value, titleCase(value));
+      return labels.get(value);
+    };
+    return rows.map(item => ({ ...item, brand: normalize(item.brand), model_description: normalize(item.model_description),
+      category: normalize(item.category) || "", sub_category: normalize(item.sub_category) || "" }));
+  }
+
+  // Numeric barcodes are always 8 digits (32690 -> 00032690); other codes are kept as typed.
+  function normBarcode(text) {
+    const value = String(text ?? "").trim();
+    return /^\d{1,7}$/.test(value) ? value.padStart(8, "0") : value;
+  }
+
+  const PAYMENT_FALLBACK = ["Cash", "Debit Card", "Credit Card", "Cheque", "Online Payment / Bank Transfer", "Home Credit", "Flexi Deals"];
+  const CATEGORY_SEEDS = { Aircon: ["Commercial", "Floor Mounted", "Split Type", "Window Type", "Portable"] };
+
+  function workspaceLoader(sequence) {
+    connectedContent.innerHTML = '<div class="app-loader"><svg viewBox="0 0 512 512" width="84" height="84" aria-hidden="true"><rect width="512" height="512" rx="112" fill="#355ee8"/><g fill="#fff"><rect class="ldr-bar b1" x="124" y="267" width="56" height="133" rx="20"/><rect class="ldr-bar b2" x="228" y="164" width="56" height="236" rx="20"/><rect class="ldr-bar b3" x="332" y="306" width="56" height="94" rx="20"/></g></svg><div class="workspace-progress" role="progressbar" aria-label="Loading workspace" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="workspace-progress-fill"></div></div><strong data-load-percent>0%</strong><span role="status" data-load-stage>Signing in...</span></div>';
+    const bar = connectedContent.querySelector(".workspace-progress");
+    const fill = connectedContent.querySelector(".workspace-progress-fill");
+    const label = connectedContent.querySelector("[data-load-percent]");
+    const stage = connectedContent.querySelector("[data-load-stage]");
+    let value = 0;
+    const update = (percent, message) => {
+      if (sequence !== loadSequence || !bar.isConnected) return;
+      value = Math.max(value, Math.min(100, Math.round(percent)));
+      bar.setAttribute("aria-valuenow", String(value));
+      fill.style.width = `${value}%`;
+      label.textContent = `${value}%`;
+      stage.textContent = message;
+    };
+    return {
+      update,
+      async finish() {
+        update(100, "Workspace ready");
+        await new Promise(resolve => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)));
+      },
+    };
+  }
+
+  // When a future OAuth client redirects the user to the Branchline consent
+  // page, finish their normal Sales Tracker sign-in first. Only return to our
+  // own consent page after the active Sales profile has been verified.
+  function resumeVerifiedOauthConsent() {
+    const key = "branchline-oauth-pending";
+    const pending = sessionStorage.getItem(key);
+    if (!pending) return false;
+    sessionStorage.removeItem(key);
+    try {
+      const target = new URL(pending);
+      const expected = new URL("./oauth-consent.html", location.href);
+      const authorizationId = target.searchParams.get("authorization_id") || "";
+      if (target.origin !== location.origin ||
+          target.pathname !== expected.pathname ||
+          !/^[A-Za-z0-9_-]{8,200}$/.test(authorizationId)) return false;
+      location.assign(target.href);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function loadLiveWorkspace(session) {
+    parkAccountControls();
+    const client = demoStore ? demoStore.client : liveClient;
+    const fetchAll = (...args) => fetchAllFrom(client, ...args);
+    const isDemoLoad = Boolean(demoStore);
+    const sequence = ++loadSequence;
+    currentSession = session;
+    setWorkspaceMode("connected");
+    const loading = workspaceLoader(sequence);
+
+    try {
+      const profile = checkResult(await client
+        .from("profiles")
+        .select("id,dealer_id,district_id,branch_id,role,assigned_brand,full_name,active,salesperson_code")
+        .eq("id", session.user.id)
+        .maybeSingle(), "Unable to load your account");
+      if (sequence !== loadSequence) return;
+
+      if (!profile) {
+        throw new Error("Your login has no Branchline profile yet. Ask an administrator to assign your role and district.");
+      }
+      if (!Object.hasOwn(roleLabels, profile.role)) {
+        throw new Error("Your account has an unsupported role. Contact your administrator.");
+      }
+      if (!profile.active) {
+        throw new Error("Your Branchline account is disabled. Contact your administrator.");
+      }
+
+      currentProfile = { ...profile, full_name: titleCase(profile.full_name), assigned_brand: titleCase(profile.assigned_brand) };
+      if (!isDemoLoad && resumeVerifiedOauthConsent()) return;
+      restoreAccountFilters();
+      loading.update(10, "Loading your workspace...");
+      if (inventoryOnly()) {
+        const [branches, districts, inventory, calendar, holidays] = await Promise.all([
+          fetchAll("branches", "id,name,district_id,code,transfer_sequence", [["id", true]]),
+          fetchAll("districts", "id,name", [["id", true]]), loadInventoryData(client, fraction => loading.update(10 + fraction * 80, "Loading inventory...")),
+          loadEventCalendar(client), fetchAll("company_holidays","holiday_date,label",[["holiday_date",true]]),
+        ]);
+        if (sequence !== loadSequence || !currentSession) return;
+        liveData = { branches: checkResult(branches, "Unable to load inventory branches"), districts: checkResult(districts, "Unable to load districts"), profiles: [currentProfile], products: [], ...inventory,
+          calendar, holidays:checkResult(holidays,"Unable to load store-closed dates").map(row=>({date:row.holiday_date,label:row.label})) };
+        sanitizeAccountScope();
+        document.querySelector("#connected-user-name").textContent = connectedUserLabel();
+        document.querySelector("#connected-user-role").textContent = roleLabels[profile.role];
+        refreshPushButton(false);
+        if (!rolePageAllowed(activePage)) activePage = "inventory";
+        if (location.hash === "#inventory") ui.invView = "transfers";
+        await loading.finish();
+        if (sequence !== loadSequence || !currentSession) return;
+        renderConnected();
+        autoRegisterPush();
+        if (passwordRecoveryPending && !demoStore) openPasswordModal(true);
+        else await showInventoryReminder();
+        return;
+      }
+      const isPsUser = profile.role === "ps";
+      const deliveryRequest = fetchAll("sale_delivery_guaranties", "sale_id,amount", [["sale_id", true]]);
+      const inventoryRequest = loadInventoryData(client).then(
+        data => ({ data, error: null }),
+        error => ({ data: null, error }));
+      const psDashboardMonth = ui.period === "day"
+        ? periodDay().slice(0, 7)
+        : ui.month || currentMonth();
+      // Every branch holds an identical copy of the catalog, so one branch's copy is enough (keeps the app fast).
+      let catalogBranch = profile.branch_id;
+      if (!catalogBranch) {
+        const probe = await client.from("products").select("branch_id").eq("active", true).limit(1);
+        catalogBranch = probe.data?.[0]?.branch_id || null;
+      }
+      const requests = [
+        fetchAll("branches", "id,name,district_id,code,transfer_sequence", [["name", true], ["id", true]]),
+        fetchAll("districts", "id,name", [["name", true], ["id", true]]),
+        fetchAll("monthly_targets", "id,branch_id,month,amount", [["month", false], ["id", true]]),
+        demoStore ? Promise.resolve({ data: [], error: null })
+          : fetchAll("ps_monthly_targets", "id,branch_id,ps_id,month,amount", [["month", false], ["id", true]]),
+        fetchAll("sales",         "id,branch_id,ps_id,ps_name,salesperson_code,customer_name,invoice_number,sold_on,payment_mode,city,barangay,fulfillment_method,created_at,updated_at", [["sold_on", false], ["id", true]]),
+                fetchAll("products", "id,branch_id,barcode,model_description,brand,category,sub_category,active,srp", [["model_description", true], ["id", true]], query => (catalogBranch ? query.eq("branch_id", catalogBranch) : query).eq("active", true)),
+        fetchAll("profiles", "id,full_name,role,branch_id,district_id,assigned_brand,active,login_id,email,salesperson_code", [["id", true]]),
+        fetchAll("brand_targets", "id,branch_id,month,brand,amount", [["month", false], ["id", true]]),
+        fetchAll("sale_lines",         "id,sale_id,barcode,model_description,brand,category,sub_category,srp,selling_price,quantity", [["id", true]]),
+        fetchAll("manager_branches", "manager_id,branch_id", [["manager_id", true], ["branch_id", true]]),
+        isPsUser ? fetchExportBrandLog(client, profile.id).then(
+          data => ({ data, error: null }),
+          error => ({ data: [], error })) : Promise.resolve({ data: [], error: null }),
+                fetchAll("payment_modes", "id,name,position", [["position", true], ["name", true]]),
+        isPsUser
+          ? client.rpc("get_ps_dashboard", { p_month: `${psDashboardMonth}-01` })
+          : Promise.resolve({ data: [], error: null }),
+        fetchAll("company_holidays", "holiday_date,label", [["holiday_date", true]]),
+        fetchAll("ps_walkins", "branch_id,ps_id,counted_on,clients_assisted", [["counted_on", false], ["ps_id", true]]),
+        fetchAll("branch_walkins", "branch_id,counted_on,visitors", [["counted_on", false], ["branch_id", true]]),
+        fetchAll("push_messages", "id,status,message,created_at", [["created_at", true], ["id", true]]),
+        fetchAll("push_alert_schedules", "id,send_at,active,created_at", [["send_at", true], ["created_at", true]]),
+        fetchAll("payment_mode_targets", "id,branch_id,month,mode,share_pct,amount", [["month", false], ["id", true]]),
+        isPsUser ? Promise.resolve({ data: [], error: null }) : fetchAll("sales_import_batches", "id,label,source_file,created_at,sales_count,lines_count,amount,date_from,date_to,kind", [["created_at", false], ["id", true]]),
+        isPsUser ? Promise.resolve({ data: [], error: null }) : fetchAll("branch_daily_history", "branch_id,day,sales,transactions,walkins,remarks,payment_breakdown", [["day", false], ["branch_id", true]]),
+                fetchAll("sale_serials", "sale_id,barcode,position,serial", [["sale_id", true], ["position", true]]),
+        demoStore ? Promise.resolve({ data: [], error: null }) : fetchAll("sales_return_lines", "return_line_id,serials", [["return_line_id", true]]),
+        !demoStore && rolePages[profile.role].includes("customers") ? loadCustomerMasterAliases(client) : null,
+      ];
+      let completed = 0;
+      const [branches, districts, targets, individualGoals, sales, products, profiles, brandTargets, saleLines, managerLinks, brandSales, paymentModes, psDashboard, holidays, psWalkins, branchWalkins, pushMessages, pushSchedules, paymentTargets, importBatches, dailyHistory, saleSerials, returnLines, customerMaster] = await Promise.all(
+        requests.map(request => Promise.resolve(request).then(result => {
+          loading.update(10 + (++completed / requests.length) * 55, "Loading sales and account data...");
+          return result;
+        })));
+
+      if (sequence !== loadSequence || !currentSession) return;
+      loading.update(65, "Loading brand summaries...");
+      const brandContribution = { data: [], error: null };
+      if (isPsUser) {
+        for (let offset = 0; ; offset += 1000) {
+          const result = await client.rpc("brand_sales_contribution").order("sold_on").range(offset, offset + 999);
+          if (result.error) {
+            brandContribution.error = result.error;
+            break;
+          }
+          brandContribution.data.push(...result.data);
+          if (result.data.length < 1000) break;
+        }
+      }
+      if (brandContribution.error) console.error("Unable to load brand contribution.", brandContribution.error);
+      if (sequence !== loadSequence || !currentSession) return;
+      loading.update(70, "Preparing workspace data...");
+      const visibleBranches = checkResult(branches, "Unable to load accessible branches").map(item => ({ ...item, name: titleCase(item.name) }));
+      const visibleDistricts = checkResult(districts, "Unable to load accessible districts").map(item => ({ ...item, name: titleCase(item.name) }));
+      const visibleTargets = checkResult(targets, "Unable to load accessible targets");
+      const visibleSales = checkResult(sales, "Unable to load accessible sales").map(item => ({ ...item, customer_name: titleCase(item.customer_name) }));
+      const visibleProducts = normalizeProductRows(checkResult(products, "Unable to load the product catalog"));
+      const visibleProfiles = checkResult(profiles, "Unable to load accessible staff profiles")
+        .map(item => ({ ...item, full_name: titleCase(item.full_name), assigned_brand: titleCase(item.assigned_brand) }));
+      if (brandTargets.error) console.warn("Brand targets are unavailable.", brandTargets.error);
+      if (psDashboard.error) console.warn("The personal target summary is unavailable.", psDashboard.error);
+
+      const lines = normalizeProductRows(checkResult(saleLines, "Unable to load sale details"));
+      if (managerLinks.error) console.warn("Manager branches are unavailable.", managerLinks.error);
+      if (brandSales.error) console.warn("Brand sales are unavailable.", brandSales.error);
+
+      if (sequence !== loadSequence || !currentSession) return;
+
+      const testPsIds = new Set(visibleProfiles.filter(isTestProfile).map(item => item.id));
+      const testSaleIds = new Set(visibleSales.filter(item => isTestSale(item, testPsIds)).map(item => item.id));
+      const linesBySale = new Map();
+      lines.forEach(line => {
+        if (!linesBySale.has(line.sale_id)) linesBySale.set(line.sale_id, []);
+        linesBySale.get(line.sale_id).push(line);
+      });
+
+      liveData = {
+        deliveryGuaranties: checkResult(await deliveryRequest, "Unable to load Delivery Guarranty fees"),
+        branches: visibleBranches,
+        districts: visibleDistricts,
+        targets: visibleTargets,
+        individualGoals: individualGoals.error ? [] : individualGoals.data,
+        individualGoalLoadError: individualGoals.error ? "Individual PS targets unavailable; branch shares will be indicative only." : "",
+        brandTargets: brandTargets.error ? [] : brandTargets.data.map(item => ({ ...item, brand: titleCase(item.brand) })),
+        sales: visibleSales.filter(item => !testSaleIds.has(item.id)),
+        customerMaster,
+        testSales: visibleSales.filter(item => testSaleIds.has(item.id)),
+        testPsIds,
+        saleLines: lines.filter(line => !testSaleIds.has(line.sale_id)),
+        linesBySale,
+        returnSerialsByLine: new Map(checkResult(returnLines, "Unable to load sales return details").map(row => [row.return_line_id,row.serials])),
+        serialsBySale: (saleSerials.error ? [] : saleSerials.data).reduce((map, row) => {
+          if (!map.has(row.sale_id)) map.set(row.sale_id, []);
+          map.get(row.sale_id).push(row);
+          return map;
+        }, new Map()),
+        products: visibleProducts,
+        profiles: visibleProfiles,
+        managerLinks: managerLinks.error ? [] : managerLinks.data,
+        paymentModes: paymentModes.error || !paymentModes.data.length
+          ? PAYMENT_FALLBACK.map((name, index) => ({ id: "", name, position: index + 1 }))
+          : paymentModes.data,
+        brandSalesError: brandSales.error ? brandSales.error.message || "Unable to load the branch-wide brand sales log." : "",
+        brandSales: brandSales.error ? [] : (brandSales.data || []).map(item => ({
+          ...item,
+          brand: titleCase(item.brand),
+          category: titleCase(item.category || ""),
+          sub_category: titleCase(item.sub_category || ""),
+          model_description: titleCase(item.model_description),
+          ps_name: titleCase(item.ps_name),
+        })),
+        psDashboard: isPsUser && !psDashboard.error ? psDashboard.data?.[0] || null : null,
+        brandContribution: brandContribution.data || [],
+        brandContributionError: brandContribution.error ? contributionLoadMessage(brandContribution.error) : "",
+        holidays: holidays.error ? [] : holidays.data.map(item => ({ date: String(item.holiday_date).slice(0, 10), label: item.label || "" })),
+        psWalkins: psWalkins.error ? [] : psWalkins.data,
+        branchWalkins: branchWalkins.error ? [] : branchWalkins.data,
+        pushMessages: pushMessages.error ? [] : pushMessages.data,
+        pushSchedules: pushSchedules.error ? [] : pushSchedules.data.map(item => ({ ...item, send_at: String(item.send_at || "").slice(0, 5) })),
+        paymentTargets: paymentTargets.error ? [] : paymentTargets.data.map(item => ({ ...item, month: String(item.month).slice(0, 10), share_pct: item.share_pct === null ? null : Number(item.share_pct), amount: item.amount === null ? null : Number(item.amount) })),
+        importBatches: importBatches.error ? [] : importBatches.data,
+        dailyHistory: dailyHistory.error ? [] : dailyHistory.data.map(row => ({ ...row, day: String(row.day).slice(0, 10), sales: Number(row.sales), transactions: Number(row.transactions) })),
+        exportWarnings: [
+          ["Individual PS targets", individualGoals],
+          ["Brand targets", brandTargets], ["Manager links", managerLinks], ["Brand sales", brandSales],
+          ["Personal dashboard", psDashboard], ["Brand contribution", brandContribution], ["Store-closed dates", holidays],
+          ["Clients assisted", psWalkins], ["Store walk-ins", branchWalkins], ["Payment targets", paymentTargets],
+          ["Import batches", importBatches], ["Imported daily history", dailyHistory], ["Serial numbers", saleSerials],
+          ["Payment modes", paymentModes],
+          ...(profile.role === "admin" ? [["Push messages", pushMessages], ["Push schedules", pushSchedules]] : []),
+        ].filter(([, result]) => result.error).map(([label]) => label),
+      };
+      loading.update(70, "Loading inventory...");
+      try {
+        const inventory = await inventoryRequest;
+        if (sequence !== loadSequence || !currentSession) return;
+        if (inventory.error) throw inventory.error;
+        Object.assign(liveData, inventory.data);
+        loading.update(95, "Preparing workspace...");
+      }
+      catch (error) {
+        console.error("Unable to load inventory.", error);
+        const advice = ["PGRST202", "42883"].includes(error.code)
+          ? "Apply the inventory database update and reload."
+          : error.code === "57014" || /statement timeout/i.test(error.message)
+            ? /inventory_catalog:/.test(error.message)
+              ? "The inventory catalog query timed out. Ask your administrator to apply the catalog performance update (20261110000000), then reload."
+              : "The inventory data query timed out. Ask your administrator to apply the inventory read performance update (20261117000000), then reload."
+            : "Reload to retry. If this continues, share this error with your administrator.";
+        liveData.inventoryError = `Inventory is unavailable: ${error.message}. ${advice}`;
+      }
+      const [climate, calendar] = await Promise.all([loadClimateContext(client), loadEventCalendar(client)]);
+      if (sequence !== loadSequence || !currentSession) return;
+      liveData.climate = climate;
+      liveData.calendar = calendar;
+
+      document.querySelector("#connected-user-name").textContent = connectedUserLabel();
+      const ownDistrict = visibleDistricts.find(item => item.id === profile.district_id)?.name;
+      const roleDetail = profile.role === "ps"
+        ? `${roleLabels[profile.role]}${profile.assigned_brand ? ` · ${profile.assigned_brand}` : ""}`
+        : profile.role === "manager" && visibleBranches.length
+          ? `${roleLabels[profile.role]} · ${visibleBranches.map(item => item.name).join(", ")}`
+          : profile.role === "district_manager" && ownDistrict
+            ? `${roleLabels[profile.role]} · ${ownDistrict}`
+            : roleLabels[profile.role];
+      document.querySelector("#connected-user-role").textContent = roleDetail;
+      refreshPushButton(profile.role === "ps");
+      if (location.hash === "#inventory") { activePage = "inventory"; ui.invView = "transfers"; }
+      if (!ui.month) ui.month = currentMonth();
+      sanitizeAccountScope();
+      activePage = rolePageAllowed(activePage) ? activePage : "overview";
+      await loading.finish();
+      if (sequence !== loadSequence || !currentSession) return;
+      renderConnected();
+      if (passwordRecoveryPending && !demoStore) {
+        openPasswordModal(true);
+      } else if (profile.role === "ps" && !demoStore) {
+        showPacePopup();
+        autoRegisterPush();
+      } else autoRegisterPush();
+      if (!passwordRecoveryPending) {
+        await showInventoryReminder();
+        showDailyCalendarEventNotices();
+      }
+    } catch (error) {
+      if (sequence !== loadSequence) return;
+      console.error("Unable to load the authenticated Branchline workspace.", error);
+      if (isDemoLoad) {
+        exitDemo(true);
+        document.querySelector("#reset-saved-demo").hidden = false;
+      }
+      showProfileError(error.message || "Unable to load your workspace. Try again or contact your administrator.");
+    }
+  }
+
+  function branchName(branchId) {
+    return liveData?.branches.find(branch => branch.id === branchId)?.name || "Unavailable branch";
+  }
+
+  function districtName(districtId) {
+    return liveData?.districts.find(district => district.id === districtId)?.name || "—";
+  }
+
+  function branchDistrictName(branchId) {
+    return districtName(liveData.branches.find(branch => branch.id === branchId)?.district_id);
+  }
+
+  function linesForSale(saleId) {
+    return liveData.linesBySale.get(saleId) || [];
+  }
+
+  function saleTotal(sale, basis = ui.salesBasis) {
+    return linesForSale(sale.id).reduce((total, line) =>
+      total + window.BranchlineAnalytics.salesLineAmount(line, basis), 0);
+  }
+
+  function periodDay() {
+    return ui.date || localISODate();
+  }
+
+  // Month used to anchor targets and year-to-date totals for the selected period.
+  function anchorMonth() {
+    return ui.period === "day" ? periodDay().slice(0, 7) : ui.month;
+  }
+
+  function inPeriod(dateText) {
+    const text = String(dateText ?? "");
+    if (ui.period === "day") return text.slice(0, 10) === periodDay();
+    if (ui.period === "year") return text.slice(0, 4) === ui.month.slice(0, 4) && text.slice(0, 7) <= ui.month;
+    return text.slice(0, 7) === ui.month;
+  }
+
+  // Charts and totals for a single day show the month so far, up to and including that day.
+  function inStatus(dateText) {
+    if (ui.period !== "day") return inPeriod(dateText);
+    const text = String(dateText ?? "").slice(0, 10);
+    const day = periodDay();
+    return text.slice(0, 7) === day.slice(0, 7) && text <= day;
+  }
+
+  function statusLabel() {
+    if (ui.period !== "day") return periodLabel();
+    const day = periodDay();
+    const month = new Date(`${day}T12:00:00`).toLocaleDateString("en", { month: "long", year: "numeric" });
+    const [monthName, year] = month.split(" ");
+    return `${monthName} 1–${Number(day.slice(8, 10))}, ${year}`;
+  }
+
+  function targetInPeriod(monthText) {
+    const text = String(monthText ?? "").slice(0, 7);
+    const anchor = anchorMonth();
+    if (ui.period === "year") return text.slice(0, 4) === anchor.slice(0, 4) && text <= anchor;
+    return text === anchor;
+  }
+
+  function periodLabel() {
+    if (ui.period === "day") {
+      return new Date(`${periodDay()}T12:00:00`).toLocaleDateString("en", { month: "long", day: "numeric", year: "numeric" });
+    }
+    if (ui.period === "year") return `Year to date ${ui.month.slice(0, 4)} (through ${monthLabel(ui.month).split(" ")[0]})`;
+    return monthLabel(ui.month);
+  }
+
+  function addTo(map, key, amount) {
+    map.set(key, (map.get(key) || 0) + amount);
+  }
+
+  function visibleSales() {
+    return liveData.sales.filter(sale => currentProfile.role !== "ps" || sale.ps_id === currentProfile.id);
+  }
+
+  // An assignment can list several brands separated by "/" (e.g. "Fujidenzo / Whirlpool"), and each one can be limited
+  // to a category with "Brand - Scope" (e.g. "Carrier / Condura - Aircon").
+  function psBrandParts(assigned) {
+    return window.BranchlineInventory.brandParts(assigned, liveData.products);
+  }
+
+  function scopeBranchIds() {
+    return new Set(liveData.branches
+      .filter(branch => (!ui.district || branch.district_id === ui.district) && (!ui.branch || branch.id === ui.branch))
+      .map(branch => branch.id));
+  }
+
+  // District managers and above can narrow individual tables to one branch.
+  const canPickBranch = () => ["admin", "district_manager"].includes(currentProfile.role);
+
+  function panelBranchSelect(key, ids, className = "field an-inline") {
+    if (universalPages.has(activePage)) return "";
+    const branches = liveData.branches.filter(branch => ids.has(branch.id)).sort((a, b) => natural(a.name, b.name));
+    if (!canPickBranch() || branches.length < 2) return "";
+    return `<label class="${className}"><span class="${className.includes("an-inline") ? "visually-hidden" : ""}">Branch</span><select data-filter="${key}"><option value="">All branches</option>${branches.map(branch =>
+      `<option value="${escapeHTML(branch.id)}" ${ui[key] === branch.id ? "selected" : ""}>${escapeHTML(branch.name)}</option>`).join("")}</select></label>`;
+  }
+
+  function panelIds(key, ids) {
+    if (universalPages.has(activePage)) return ids;
+    return canPickBranch() && ui[key] && ids.has(ui[key]) ? new Set([ui[key]]) : ids;
+  }
+
+  function availableMonths() {
+    const months = new Set([currentMonth(), ui.month].filter(Boolean));
+    liveData.sales.forEach(sale => sale.sold_on && months.add(sale.sold_on.slice(0, 7)));
+    liveData.targets.forEach(target => months.add(target.month.slice(0, 7)));
+    return [...months].sort().reverse();
+  }
+
+  function branchRows() {
+    const ids = scopeBranchIds();
+    const month = anchorMonth();
+    const year = month.slice(0, 4);
+    const actual = new Map();
+    const ytd = new Map();
+    withHistoryFacts(analyticsFacts(ids), ids, currentProfile.role === "ps").forEach(fact => {
+      const saleMonth = fact.date.slice(0, 7);
+      if (inStatus(fact.date)) addTo(actual, fact.branchId, fact.amount);
+      if (saleMonth.slice(0, 4) === year && saleMonth <= month) addTo(ytd, fact.branchId, fact.amount);
+    });
+    const target = new Map();
+    const ytdTarget = new Map();
+    liveData.targets.forEach(row => {
+      if (!ids.has(row.branch_id)) return;
+      const rowMonth = row.month.slice(0, 7);
+      if (targetInPeriod(row.month)) addTo(target, row.branch_id, Number(row.amount));
+      if (rowMonth.slice(0, 4) === year && rowMonth <= month) addTo(ytdTarget, row.branch_id, Number(row.amount));
+    });
+    return liveData.branches.filter(branch => ids.has(branch.id)).map(branch => ({
+      branch,
+      district: districtName(branch.district_id),
+      actual: actual.get(branch.id) || 0,
+      target: target.get(branch.id) || 0,
+      ytd: ytd.get(branch.id) || 0,
+      ytdTarget: ytdTarget.get(branch.id) || 0,
+    })).sort((a, b) => natural(a.district, b.district) || natural(a.branch.name, b.branch.name));
+  }
+
+  function personalTargetProgress(basis = ui.salesBasis) {
+    const branchId = currentProfile.branch_id;
+    const activePsCount = Number(liveData.psDashboard?.ps_count) || 0;
+    const branchTarget = liveData.targets
+      .filter(row => row.branch_id === branchId && targetInPeriod(row.month))
+      .reduce((total, row) => total + Number(row.amount), 0);
+    // Equal store-target share is the approved PS goal. Saved manual overrides
+    // never change the achievement denominator.
+    const target = activePsCount && branchTarget > 0 ? branchTarget / activePsCount : 0;
+    const targetSource = "equal-share";
+    const actual = liveData.sales
+      .filter(sale => sale.ps_id === currentProfile.id
+        && sale.branch_id === branchId
+        && inStatus(sale.sold_on))
+      .reduce((total, sale) => total + saleTotal(sale, "price"), 0);
+    return { actual, target, branchTarget, activePsCount, targetSource };
+  }
+
+  function psTargetCharts(scope) {
+    const personal = personalTargetProgress();
+    const count = personal.activePsCount;
+    return [
+      progressChart(personal.actual, personal.branchTarget, scope, {
+        title: "My sales vs store target",
+        currentLabel: "My sales",
+        emptyText: "No branch target is set for this period yet.",
+      }),
+      progressChart(personal.actual, personal.target,
+        `${scope} · store target ÷ ${count} active PS${count === 1 ? "" : "s"} in the branch`, {
+        title: "My credited sales vs equal PS target",
+        currentLabel: "My sales",
+        emptyText: count ? "No branch target is set for this period yet." : "The Product Specialist count is unavailable, so your share cannot be calculated.",
+      }),
+    ];
+  }
+
+  function brandRows(scope) {
+    const ids = scope || scopeBranchIds();
+    const I = window.BranchlineInventory;
+    const actual = new Map();
+    const target = new Map();
+    const categories = new Map();
+    const subs = new Map();
+    const labels = new Map();
+    const definitions = liveData.brandTargets.filter(row => ids.has(row.branch_id) && targetInPeriod(row.month)).map(row => {
+      const parts = I.brandParts(row.brand, liveData.products);
+      const key = parts.map(part => `${part.brand}${part.scope ? ` - ${part.scope}` : ""}`).sort().join(" / ");
+      labels.set(key, parts.map(part => part.full).join(" / "));
+      addTo(target, key, Number(row.amount));
+      return { row, parts, key };
+    });
+    const byPeriod = new Map();
+    definitions.forEach(item => {
+      const period = `${item.row.branch_id}|${item.row.month.slice(0, 7)}`;
+      if (!byPeriod.has(period)) byPeriod.set(period, []);
+      byPeriod.get(period).push(item);
+    });
+    byPeriod.forEach(items => items.forEach(item => {
+      item.others = items.filter(other => other.key !== item.key).flatMap(other => other.parts);
+    }));
+    const remember = (map, brand, value) => {
+      if (!value) return;
+      if (!map.has(brand)) map.set(brand, new Set());
+      map.get(brand).add(value);
+    };
+    liveData.sales.forEach(sale => {
+      if (!ids.has(sale.branch_id) || !inStatus(sale.sold_on)) return;
+      const applicable = byPeriod.get(`${sale.branch_id}|${sale.sold_on.slice(0, 7)}`) || [];
+      linesForSale(sale.id).forEach(line => {
+        const matched = applicable.filter(item => I.matchesBrandParts(line, item.parts, item.others));
+        const fallback = I.brandKey(line.brand) || "unbranded";
+        if (!labels.has(fallback)) labels.set(fallback, (line.brand || "Unbranded").trim().replace(/^con\s*-\s*/i, "").trim());
+        const keys = new Set(matched.length ? matched.map(item => item.key) : [fallback]);
+        keys.forEach(key => {
+          addTo(actual, key, window.BranchlineAnalytics.salesLineAmount(line, ui.salesBasis));
+          remember(categories, key, line.category);
+          remember(subs, key, line.sub_category);
+        });
+      });
+    });
+    const list = brand => [...(categories.get(brand) || [])].sort(natural).join(", ") || "—";
+    const subList = brand => [...(subs.get(brand) || [])].sort(natural).join(", ") || "—";
+    return [...new Set([...actual.keys(), ...target.keys()])]
+      .map(key => ({ brand: labels.get(key), category: list(key), subCategory: subList(key), actual: actual.get(key) || 0, target: target.get(key) || 0 }))
+      .sort((a, b) => {
+        const progress = row => (row.target > 0 ? row.actual / row.target : -1);
+        if (ui.brandSort === "target") return b.target - a.target || natural(a.brand, b.brand);
+        if (ui.brandSort === "progress") return progress(b) - progress(a) || natural(a.brand, b.brand);
+        if (ui.brandSort === "brand") return natural(a.brand, b.brand);
+        return b.actual - a.actual || natural(a.brand, b.brand);
+      });
+  }
+
+  // Header sorting drives the order; the branch dropdown (district managers and above) replaces the old "Rank by" box.
+  function brandPanelControl() {
+    return currentProfile.role === "ps" ? "" : panelBranchSelect("brandBranch", scopeBranchIds());
+  }
+
+  function brandTable(brands, emptyText) {
+    if (currentProfile.role === "ps") {
+      const sum = brands.reduce((total, row) => total + row.actual, 0);
+      return tableBlock(
+        "brands",
+        ["Brand", "%"],
+        brands.filter(row => row.actual > 0),
+        row => `<tr class="rank-row" data-brand-detail="${escapeHTML(row.brand)}" tabindex="0"><td><strong>${escapeHTML(row.brand)}</strong></td><td>${percent(row.actual, sum, 2)}</td></tr>`,
+        emptyText,
+      );
+    }
+    return tableBlock(
+      "brands",
+      ["Brand", "Sales", "Target", "Progress"],
+      brands,
+      row => `<tr class="rank-row" data-brand-detail="${escapeHTML(row.brand)}" tabindex="0"><td><strong>${escapeHTML(row.brand)}</strong></td><td>${formatMoney(row.actual)}</td><td>${formatMoney(row.target)}</td><td>${percent(row.actual, row.target)}</td></tr>`,
+      emptyText,
+    );
+  }
+
+  const uniqueSorted = values => [...new Set(values.filter(Boolean))].sort(natural);
+
+  // Sales lines of one Product Specialist. A transferred PS starts over: only the current branch counts.
+  function psSaleLines(psId) {
+    const owner = liveData.profiles.find(item => item.id === psId);
+    const result = [];
+    liveData.sales.forEach(sale => {
+      if (sale.ps_id !== psId || !inPeriod(sale.sold_on)) return;
+      if (owner?.branch_id && owner.branch_id !== sale.branch_id) return;
+      linesForSale(sale.id).forEach(line => result.push({ sale, line }));
+    });
+    return result;
+  }
+
+  const lineMatches = (line, filters) =>
+    (!filters.brand || (line.brand || "").trim() === filters.brand)
+    && (!filters.category || line.category === filters.category)
+    && (!filters.sub || line.sub_category === filters.sub);
+
+  function psRankingRows(scope) {
+    const ids = scope || scopeBranchIds();
+    const filters = { brand: ui.rankBrand, category: ui.rankCategory, sub: ui.rankSub };
+    const filtered = Boolean(filters.brand || filters.category || filters.sub);
+    const totals = new Map(), creditedSales = new Map();
+    const profiles = new Map(liveData.profiles.map(person => [person.id, person]));
+    liveData.sales.forEach(sale => {
+      const person = profiles.get(sale.ps_id);
+      if (!person || person.role !== "ps" || !person.active || isTestProfile(person)
+          || person.branch_id !== sale.branch_id || isTestSale(sale)
+          || !ids.has(sale.branch_id) || !inPeriod(sale.sold_on)) return;
+      linesForSale(sale.id).forEach(line => {
+        if (!lineMatches(line, filters)) return;
+        addTo(totals, person.id, window.BranchlineAnalytics.salesLineAmount(line, ui.salesBasis));
+        addTo(creditedSales, person.id, window.BranchlineAnalytics.salesLineAmount(line, "price"));
+      });
+    });
+    if (!filtered) {
+      liveData.profiles.forEach(person => {
+        if (person.role === "ps" && person.active && !isTestProfile(person)
+            && person.branch_id && ids.has(person.branch_id) && !totals.has(person.id)) {
+          totals.set(person.id, 0);
+        }
+      });
+    }
+    return [...totals].map(([id, total]) => {
+      const person = profiles.get(id);
+      const month = ui.month;
+      const count = !filtered && ui.period === "month"
+        ? liveData.profiles.filter(p => p.role === "ps" && p.active
+          && !isTestProfile(p) && p.branch_id === person?.branch_id).length : 0;
+      const storeTarget = count ? liveData.targets.filter(t =>
+        t.branch_id === person.branch_id && String(t.month).slice(0, 7) === month)
+        .reduce((sum, row) => sum + Number(row.amount || 0), 0) : 0;
+      const target = count && storeTarget > 0 ? storeTarget / count : null;
+      const achievement = target ? (creditedSales.get(id) || 0) / target * 100 : null;
+      return {
+        id, name: person?.full_name || "Staff member",
+        salesCode: person?.salesperson_code || "—",
+        brand: person?.assigned_brand || "—",
+        branch: person?.branch_id ? branchName(person.branch_id) : "—",
+        total, target, achievement,
+      };
+    }).sort((a, b) => b.total - a.total || natural(a.name, b.name))
+      .map((row, index) => ({ ...row, rank: index + 1 }));
+  }
+
+  function rankFilterSelect(key, label, options, selected) {
+    return `<label class="field"><span>${escapeHTML(label)}</span><select data-filter="${key}"><option value="">All</option>${options.map(option =>
+      `<option value="${escapeHTML(option)}" ${selected === option ? "selected" : ""}>${escapeHTML(option)}</option>`).join("")}</select></label>`;
+  }
+
+
+  // Award totals exclude demo records, test profiles, zero sales and prior-branch transactions.
+  function psAwardRankingRows(scope, certificateWindow = null) {
+    const ids = scope || scopeBranchIds();
+    // A certificate has its own independent reporting window. Never relabel
+    // a monthly dashboard ranking as annual (or the reverse).
+    const withinAwardPeriod = dateText => {
+      const day = String(dateText || "").slice(0, 10);
+      return certificateWindow
+        ? day >= certificateWindow.from && day <= certificateWindow.through
+        : inPeriod(dateText);
+    };
+    const profiles = new Map(liveData.profiles.map(p => [p.id, p]));
+    const testIds = new Set(liveData.profiles.filter(isTestProfile).map(p => p.id));
+    const filters = { brand: ui.rankBrand, category: ui.rankCategory, sub: ui.rankSub };
+    const totals = new Map(), actualPriceTotals = new Map(), transactions = new Map(), dailyByPs = new Map();
+    liveData.sales.forEach(sale => {
+      const person = profiles.get(sale.ps_id);
+      if (!person || person.role !== "ps" || person.active === false || isTestProfile(person)
+          || isTestSale(sale, testIds) || (person.branch_id && person.branch_id !== sale.branch_id)
+          || !ids.has(sale.branch_id) || !withinAwardPeriod(sale.sold_on)) return;
+      const sum = linesForSale(sale.id).filter(line => lineMatches(line, filters))
+        .reduce((total, line) => total + window.BranchlineAnalytics.salesLineAmount(line, ui.salesBasis), 0);
+      if (!(sum > 0)) return;
+      addTo(totals, sale.ps_id, sum);
+      const actualPrice = linesForSale(sale.id).filter(line => lineMatches(line, filters))
+        .reduce((total, line) => total + window.BranchlineAnalytics.salesLineAmount(line, "price"), 0);
+      addTo(actualPriceTotals, sale.ps_id, actualPrice);
+      transactions.set(sale.ps_id, (transactions.get(sale.ps_id) || 0) + 1);
+      if (!dailyByPs.has(sale.ps_id)) dailyByPs.set(sale.ps_id, new Map());
+      addTo(dailyByPs.get(sale.ps_id), String(sale.sold_on).slice(0, 10), sum);
+    });
+    const assistance = new Map();
+    // A PS conversion estimate is shown only on days with reported assisted
+    // clients. Monthly conversions must not assume missing days had zero traffic.
+    if (!filters.brand && !filters.category && !filters.sub) {
+      (liveData.psWalkins || []).forEach(item => {
+        const person = profiles.get(item.ps_id);
+        const date = String(item.counted_on || "").slice(0, 10);
+        if (!person || person.role !== "ps" || person.active === false
+            || person.branch_id !== item.branch_id || !ids.has(item.branch_id)
+            || !withinAwardPeriod(date) || isTestProfile(person)) return;
+        const count = Number(item.clients_assisted);
+        if (!Number.isFinite(count) || count < 0) return;
+        if (!assistance.has(item.ps_id)) assistance.set(item.ps_id, { assisted: 0, dates: new Set() });
+        const entry = assistance.get(item.ps_id);
+        entry.assisted += Math.trunc(count);
+        entry.dates.add(date);
+      });
+    }
+    return [...totals].map(([id, total]) => {
+      const person = profiles.get(id);
+      const count = transactions.get(id) || 0;
+      const showTarget = certificateWindow === null && ui.period === "month" && !filters.brand && !filters.category && !filters.sub;
+      const countPs = showTarget ? liveData.profiles.filter(p =>
+        p.role === "ps" && p.active && !isTestProfile(p) && p.branch_id === person.branch_id).length : 0;
+      const storeTarget = showTarget ? liveData.targets.filter(t =>
+        t.branch_id === person.branch_id && String(t.month).slice(0, 7) === ui.month)
+        .reduce((sum, t) => sum + Number(t.amount || 0), 0) : 0;
+      const indicativeShare = showTarget && countPs && storeTarget > 0 ? storeTarget / countPs : null;
+      const goal = indicativeShare;
+      const targetLabel = "Equal share of monthly store target";
+      const today = localISODate();
+      const selectedMonth = ui.month;
+      const pastMonthEnd = selectedMonth && /^\d{4}-\d{2}$/.test(selectedMonth)
+        ? new Date(Date.UTC(Number(selectedMonth.slice(0, 4)), Number(selectedMonth.slice(5, 7)), 0)).toISOString().slice(0, 10)
+        : today;
+      const asOf = certificateWindow ? null : ui.period === "day" ? periodDay()
+        : selectedMonth < today.slice(0, 7) ? pastMonthEnd
+        : selectedMonth === today.slice(0, 7) ? today : null;
+      const trend = asOf && window.BranchlinePsPerformance?.specialistTrend
+        ? window.BranchlinePsPerformance.specialistTrend(dailyByPs.get(id) || new Map(), asOf) : null;
+      let pace = null, monthProjection = null;
+      if (showTarget && selectedMonth === today.slice(0, 7)
+        && typeof calendarForecastRules === "function"
+        && window.BranchlineAnalytics?.forecastMonth && window.BranchlinePsPerformance?.timePace) {
+        const rules = calendarForecastRules(new Set([person.branch_id]));
+        const forecast = window.BranchlineAnalytics.forecastMonth({
+          month: selectedMonth, refDate: today,
+          daily: Object.fromEntries(dailyByPs.get(id) || []), rules, partialDay: true,
+        });
+        const expected = paceFraction(new Set([person.branch_id]));
+        pace = window.BranchlinePsPerformance.timePace({
+          target: goal, actual: total, paceFraction: expected,
+          remainingSellingDays: forecast.paceDays,
+        });
+        if (forecast.status === "projected") monthProjection = forecast.value;
+      }
+      const assistRecord = assistance.get(id);
+      const countedTransactions = assistRecord ? liveData.sales.filter(sale =>
+        sale.ps_id === id && sale.branch_id === person.branch_id
+        && assistRecord.dates.has(String(sale.sold_on || "").slice(0, 10))
+        && !isTestSale(sale, testIds)).length : 0;
+      // More recorded sales than logged assisted clients is ambiguous; omit.
+      const assisted = assistRecord?.assisted || 0;
+      const conversion = assisted > 0 && countedTransactions <= assisted
+        ? countedTransactions / assisted * 100 : null;
+      return {
+        id, name: person.full_name || "Staff member",
+        brand: person.assigned_brand || "—", branch: branchName(person.branch_id),
+        total, transactions: count, avgTicket: count ? total / count : 0,
+        assisted, conversion, trend, pace, monthProjection,
+        assignedTarget: null, targetLabel,
+        targetShare: goal, progress: goal ? (actualPriceTotals.get(id) || 0) / goal * 100 : null,
+      };
+    }).sort((a, b) => b.total - a.total || natural(a.name, b.name) || natural(a.id, b.id))
+      .slice(0, 10).map((row, index) => ({ ...row, rank: index + 1 }));
+  }
+
+  function psAwardScopeLabel(ids) {
+    const names = liveData.branches.filter(branch => ids.has(branch.id)).map(branch => branch.name).sort(natural);
+    return names.length === 1 ? names[0] : names.length + " authorized branches";
+  }
+
+  function downloadTopPsCertificates(onlyId) {
+    if (!["manager", "district_manager", "admin"].includes(currentProfile?.role)
+        || demoStore || !["overview", "targets"].includes(activePage)) return;
+    const profileId = currentProfile.id, sessionClient = client;
+    const scope = panelIds("rankBranch", scopeBranchIds());
+    const today = localISODate();
+    const selectedMonth = /^\d{4}-(0[1-9]|1[0-2])$/.test(ui.month || "")
+      && ui.month <= today.slice(0, 7) ? ui.month : today.slice(0, 7);
+    const selectedYear = selectedMonth.slice(0, 4);
+    const initialKind = ui.period === "year" ? "annual" : "monthly";
+    let prepared = null;
+    openModal({
+      title: onlyId ? "Product Specialist Certificate" : "Product Specialist Awards",
+      intro: "Choose the awardee count and period, then preview the actual certificate PDF before downloading. Names are optional.",
+      submitLabel: "Preview certificates",
+      wide: true,
+      body: `<label class="field"><span>Certificate period</span>
+        <select name="certificate_kind" required>
+          <option value="monthly" ${initialKind === "monthly" ? "selected" : ""}>Monthly certificate</option>
+          <option value="annual" ${initialKind === "annual" ? "selected" : ""}>Annual certificate</option>
+        </select></label>
+        ${onlyId ? "" : `<label class="field"><span>Number of awardees</span><select name="certificate_count" required>
+          ${Array.from({ length: 10 }, (_, index) => index + 1).map(count =>
+            `<option value="${count}" ${count === 10 ? "selected" : ""}>Top ${count}</option>`).join("")}
+        </select></label>`}
+        <label class="field" data-certificate-month><span>Month covered</span>
+          <input type="month" name="certificate_month" max="${today.slice(0, 7)}"
+            value="${selectedMonth}" required></label>
+        <label class="field" data-certificate-year><span>Year covered</span>
+          <input type="number" name="certificate_year" min="2000" max="${today.slice(0, 4)}"
+            step="1" value="${selectedYear}" required></label>
+        <label class="field"><span>Branch Manager name (optional)</span>
+          <input type="text" name="branch_manager_name" maxlength="80" autocapitalize="characters" class="certificate-signatory-input"
+            placeholder="Enter printed name under the signature line" autocomplete="off"></label>
+        <label class="field"><span>District Manager name (optional)</span>
+          <input type="text" name="district_manager_name" maxlength="80" autocapitalize="characters" class="certificate-signatory-input"
+            placeholder="Enter printed name under the signature line" autocomplete="off"></label>
+        <p class="an-note">Both signatory names appear beneath the approved signature lines. Every recipient gets one A4 landscape certificate page.</p>
+        <div class="certificate-preview" data-certificate-preview hidden>
+          <p class="an-note" role="status" data-certificate-preview-status></p>
+          <iframe title="Certificate PDF preview" data-certificate-preview-frame></iframe>
+        </div>`,
+      onReady: form => {
+        for (const fieldName of ["branch_manager_name", "district_manager_name"]) {
+          const field = form.elements[fieldName];
+          field.addEventListener("input", () => {
+            const start = field.selectionStart, end = field.selectionEnd;
+            const normalized = field.value.toLocaleUpperCase("en-PH");
+            if (normalized !== field.value) {
+              field.value = normalized;
+              if (start !== null && end !== null) field.setSelectionRange(start, end);
+            }
+          });
+          field.addEventListener("blur", () => {
+            field.value = field.value.trim().replace(/\s+/g, " ").toLocaleUpperCase("en-PH");
+          });
+        }
+        const download = document.createElement("button");
+        download.type = "button";
+        download.className = "button button-primary";
+        download.textContent = "Download approved PDF";
+        download.disabled = true;
+        form.querySelector(".dlg-actions")?.append(download);
+        const invalidate = () => {
+          prepared = null;
+          download.disabled = true;
+          form.querySelector("[data-certificate-preview]").hidden = true;
+          form.querySelector("[data-certificate-preview-frame]").removeAttribute("src");
+          const root = form.closest(".dlg-backdrop");
+          if (root?.certificatePreviewUrl) {
+            URL.revokeObjectURL(root.certificatePreviewUrl);
+            root.certificatePreviewUrl = null;
+          }
+        };
+        form.addEventListener("input", invalidate);
+        form.addEventListener("change", invalidate);
+        download.addEventListener("click", () => {
+          if (!prepared) return;
+          if (currentProfile?.id !== profileId || client !== sessionClient
+              || !["overview", "targets"].includes(activePage)) {
+            invalidate();
+            alert("Your session or selected page changed. Preview certificates again.");
+            return;
+          }
+          downloadFile(prepared.name, prepared.blob);
+        });
+        const update = () => {
+          const isAnnual = form.elements.certificate_kind.value === "annual";
+          form.querySelector("[data-certificate-month]").hidden = isAnnual;
+          form.querySelector("[data-certificate-year]").hidden = !isAnnual;
+          form.elements.certificate_month.disabled = isAnnual;
+          form.elements.certificate_year.disabled = !isAnnual;
+        };
+        form.elements.certificate_kind.addEventListener("change", update);
+        update();
+      },
+      onSubmit: async form => {
+        const { certificatePeriodRange } = await import("./certificate-periods.mjs?v=certificate-label-20261121");
+        const kind = form.elements.certificate_kind.value;
+        const value = kind === "annual"
+          ? String(form.elements.certificate_year.value).trim()
+          : String(form.elements.certificate_month.value).trim();
+        const window = certificatePeriodRange(kind, value, today);
+        const { topSpecialistAwardees, certificateDocument } = await import("./ps-certificates.mjs?v=certificate-label-20261121");
+        if (currentProfile?.id !== profileId || client !== sessionClient || !["overview", "targets"].includes(activePage)) {
+          throw new Error("Your session or selected page changed. Open the certificate form again.");
+        }
+        const ranking = psAwardRankingRows(scope, window);
+        const awardeeCount = onlyId ? 10 : Number(form.elements.certificate_count.value);
+        if (!Number.isInteger(awardeeCount) || awardeeCount < 1 || awardeeCount > 10) {
+          throw new Error("Choose between 1 and 10 awardees.");
+        }
+        const awardees = topSpecialistAwardees(ranking, liveData.profiles, awardeeCount);
+        const selected = onlyId ? awardees.filter(row => row.id === onlyId) : awardees;
+        if (!selected.length) {
+          throw new Error(onlyId
+            ? "This specialist is not among the eligible Top 10 for the chosen period and filters."
+            : "There are no eligible Product Specialists with positive sales for this period.");
+        }
+        const doc = certificateDocument(selected, {
+          period: window.label,
+          issuedOn: today,
+          branchManagerName: String(form.elements.branch_manager_name.value || "").trim().replace(/\s+/g, " ").toLocaleUpperCase("en-PH"),
+          districtManagerName: String(form.elements.district_manager_name.value || "").trim().replace(/\s+/g, " ").toLocaleUpperCase("en-PH"),
+        });
+        const pdf = await loadPdfLibrary();
+        if (currentProfile?.id !== profileId || client !== sessionClient || !["overview", "targets"].includes(activePage)) {
+          throw new Error("Your session changed. The certificate was not exported.");
+        }
+        const name = "first-megasaver-" + (onlyId ? "ps-certificate-rank-" + selected[0].rank
+          : "top-" + selected.length + "-ps-certificates") + "-" + window.fileKey + ".pdf";
+        const blob = await new Promise((resolve, reject) => {
+          try { pdf.createPdf(doc).getBlob(resolve); } catch (error) { reject(error); }
+        });
+        if (currentProfile?.id !== profileId || client !== sessionClient || !["overview", "targets"].includes(activePage)
+            || !form.isConnected) throw new Error("Your session changed. Reopen the certificate preview.");
+        const root = form.closest(".dlg-backdrop");
+        if (root.certificatePreviewUrl) URL.revokeObjectURL(root.certificatePreviewUrl);
+        root.certificatePreviewUrl = URL.createObjectURL(blob);
+        prepared = { blob, name };
+        const preview = form.querySelector("[data-certificate-preview]");
+        preview.hidden = false;
+        form.querySelector("[data-certificate-preview-status]").textContent =
+          selected.length + " certificate" + (selected.length === 1 ? "" : "s")
+          + " · " + window.label + " · review the pages before downloading.";
+        form.querySelector("[data-certificate-preview-frame]").src = root.certificatePreviewUrl;
+        form.querySelector(".dlg-actions button:last-child").disabled = false;
+        return false;
+      },
+    });
+  }
+
+  function psIndividualTargetPanel() {
+    if (!["manager", "district_manager", "admin"].includes(currentProfile?.role)
+        || ui.period !== "month") return "";
+    const ids = panelIds("rankBranch", scopeBranchIds());
+    const people = liveData.profiles.filter(person =>
+      person.role === "ps" && person.active && !isTestProfile(person)
+      && person.branch_id && ids.has(person.branch_id))
+      .sort((a, b) => natural(branchName(a.branch_id), branchName(b.branch_id)) || natural(a.full_name, b.full_name));
+    const counts = new Map(), goals = new Map(), sales = new Map();
+    people.forEach(person => counts.set(person.branch_id, (counts.get(person.branch_id) || 0) + 1));
+    liveData.targets.filter(target => ids.has(target.branch_id) && String(target.month).slice(0, 7) === ui.month)
+      .forEach(target => addTo(goals, target.branch_id, Number(target.amount || 0)));
+    const valid = new Map(people.map(person => [person.id, person]));
+    let missingCodes = 0;
+    liveData.sales.forEach(sale => {
+      const person = valid.get(sale.ps_id);
+      if (!person || person.branch_id !== sale.branch_id || String(sale.sold_on).slice(0, 7) !== ui.month
+          || isTestSale(sale)) return;
+      addTo(sales, person.id, saleTotal(sale, "price"));
+      if (!String(sale.salesperson_code || "").trim()) missingCodes++;
+    });
+    const rows = people.map(person => {
+      const storeTarget = goals.get(person.branch_id) || 0;
+      const target = storeTarget > 0 ? storeTarget / counts.get(person.branch_id) : null;
+      const credited = sales.get(person.id) || 0;
+      const achievement = target ? credited / target : null;
+      return '<tr><td><strong>' + escapeHTML(person.full_name) + '</strong></td>'
+        + '<td>' + escapeHTML(branchName(person.branch_id)) + '</td>'
+        + '<td>' + escapeHTML(person.salesperson_code || "—") + '</td>'
+        + '<td>' + formatMoney(credited) + '</td>'
+        + '<td>' + (target ? formatMoney(target) : "—") + '</td>'
+        + '<td>' + (achievement === null ? "—" : percent(credited, target)) + '</td></tr>';
+    }).join("");
+    const note = '<p class="ps-award-note">Automatic monthly PS target = store target ÷ active branch PS (including zero-sale PS).'
+      + ' Achievement = recorded selling-price sales attributed to the PS ÷ that equal target.'
+      + ' No manual target assignment or override is used.</p>'
+      + (missingCodes ? '<p class="ps-award-note">' + missingCodes
+        + ' sale(s) have a linked PS account but no Sales Code recorded on the sale.'
+        + ' These sales are attributed by PS account until source-code reconciliation is completed.</p>' : "");
+    return panel(
+      "Automatic Product Specialist targets and achievement",
+      monthLabel(ui.month) + " · equal store-target shares; read-only.",
+      note + '<div class="table-wrap ps-target-table"><table><thead><tr>'
+        + '<th>Product Specialist</th><th>Branch</th><th>Sales Code</th>'
+        + '<th>Credited sales</th><th>Equal PS target</th><th>Achievement</th>'
+        + '</tr></thead><tbody>' + (rows || '<tr><td colspan="6">No active Product Specialists in this scope.</td></tr>')
+        + '</tbody></table></div>',
+    );
+  }
+
+  // Local, per-account and per-day snooze. This changes only the manager's
+  // view; it never sends a push or writes any sales/target records.
+  function managerAttentionSnoozeStore() {
+    if (!currentProfile?.id) return null;
+    const storageKey = "branchline:manager-attention:snoozes:" + currentProfile.id + ":"
+      + [ui.period || "month", ui.month || "", ui.district || "", ui.branch || ""].join("|");
+    const today = localISODate();
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey) || "null");
+      const ids = saved?.day === today && Array.isArray(saved.ids)
+        ? saved.ids.filter(id => typeof id === "string").slice(0, 200)
+        : [];
+      return { storageKey, day: today, ids: new Set(ids) };
+    } catch {
+      return null; // Restricted browser storage must not prevent alerts.
+    }
+  }
+
+  function snoozeManagerAttentionNotice(id) {
+    const store = managerAttentionSnoozeStore();
+    if (!store || !id || id.length > 160) return false;
+    store.ids.add(id);
+    try {
+      localStorage.setItem(store.storageKey,
+        JSON.stringify({ day: store.day, ids: [...store.ids].slice(-200) }));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function managementAttentionPanel(branches, brands) {
+    if (!["manager", "district_manager", "admin"].includes(currentProfile?.role)) return "";
+    const scoped = scopeBranchIds();
+    const expectedByBranch = Object.fromEntries(branches.map(row => [
+      row.branch.id, paceFraction(new Set([row.branch.id])),
+    ]));
+    const unassignedCount = liveData.sales.filter(sale =>
+      scoped.has(sale.branch_id) && inPeriod(sale.sold_on)
+      && !sale.ps_id && !isTestSale(sale, liveData.testPsIds)).length;
+    const scopedBrandRows = brands.map(row => ({ brand: row.brand, actual: row.actual, target: row.target }));
+    const isCurrent = ui.period === "month" && ui.month === currentMonth();
+    const stockAlerts = [];
+    const declines = [];
+    let missingCodesCount = 0;
+    if (isCurrent) {
+      const today = new Date(localISODate() + "T00:00:00Z");
+      const isoDay = delta => {
+        const day = new Date(today);
+        day.setUTCDate(day.getUTCDate() + delta);
+        return day.toISOString().slice(0, 10);
+      };
+      const recentFrom = isoDay(-29);
+      const previousFrom = isoDay(-14), previousThrough = isoDay(-8);
+      const currentFrom = isoDay(-7), currentThrough = isoDay(-1);
+      const stockMap = new Map((liveData.inventoryStock || []).map(item =>
+        [item.branch_id + "|" + String(item.barcode || "").trim().toUpperCase(), Number(item.quantity || 0)]));
+      const sold = new Map(), weekly = new Map();
+      for (const sale of liveData.sales) {
+        if (!scoped.has(sale.branch_id) || isTestSale(sale, liveData.testPsIds)) continue;
+        const date = String(sale.sold_on).slice(0, 10);
+        if (date >= recentFrom && date <= localISODate()) {
+          if (!String(sale.salesperson_code || "").trim()) missingCodesCount += 1;
+          for (const line of linesForSale(sale.id)) {
+            if (!line.barcode) continue;
+            const key = sale.branch_id + "|" + String(line.barcode).trim().toUpperCase();
+            if (!sold.has(sale.branch_id)) sold.set(sale.branch_id, new Set());
+            sold.get(sale.branch_id).add(key);
+          }
+        }
+        if ((date >= previousFrom && date <= previousThrough) ||
+            (date >= currentFrom && date <= currentThrough)) {
+          const key = sale.branch_id;
+          if (!weekly.has(key)) weekly.set(key, { current: 0, previous: 0 });
+          weekly.get(key)[date >= currentFrom ? "current" : "previous"] += saleTotal(sale, ui.salesBasis);
+        }
+      }
+      for (const row of branches) {
+        const branch = row.branch;
+        const low = [...(sold.get(branch.id) || [])]
+          .filter(key => stockMap.has(key) && stockMap.get(key) <= 1).length;
+        if (low) stockAlerts.push({ branch: branch.name, count: low });
+        const trend = weekly.get(branch.id);
+        if (trend?.previous > 0) declines.push({ branch: branch.name, ...trend });
+      }
+    }
+    const notices = window.BranchlineManagerAttention?.managerAttention({
+      rows: branches, expectedByBranch, unassignedCount, brandRows: scopedBrandRows,
+      expectedBrandPace: paceFraction(scoped), stockAlerts, declines, missingCodesCount,
+    }) || [];
+    const snoozed = managerAttentionSnoozeStore()?.ids || new Set();
+    const visible = notices.filter(notice => !snoozed.has(notice.id));
+    const contents = visible.length
+      ? '<div class="manager-attention-grid">' + visible.map(notice =>
+        '<article class="manager-attention-item manager-attention-' + notice.level + '">'
+          + '<strong>' + escapeHTML(notice.title) + '</strong>'
+          + '<p>' + escapeHTML(notice.detail) + '</p>'
+          + '<button type="button" class="button button-outline button-small" data-manager-attention-snooze="'
+          + escapeHTML(notice.id) + '" aria-label="Remind me tomorrow about ' + escapeHTML(notice.title)
+          + '">Remind me tomorrow</button></article>').join("") + '</div>'
+      : '<p class="ps-award-note">' + (notices.length
+        ? 'All current notices are snoozed until tomorrow. New exceptions will appear tomorrow.'
+        : 'No exceptions flagged for the current branch and reporting-period selection.') + '</p>';
+    return panel(
+      "Manager attention",
+      "Read-only target-pace and sales-attribution checks. These are not push notifications or scheduled messages.",
+      contents + '<button type="button" class="button button-outline manager-attention-action" data-manager-attention-analytics>Open Analytics</button>',
+    );
+  }
+
+  function managementReportPanel() {
+    if (!["manager", "district_manager", "admin"].includes(currentProfile?.role)) return "";
+    return panel(
+      "Management Report Center",
+      "Download aggregated reports for the selected month or day and your authorized branches. Weekly reports use Monday–Sunday. Customer information is excluded.",
+      '<div class="management-report-center">'
+        + '<button type="button" class="button button-outline" data-management-report="daily">Daily report</button>'
+        + '<button type="button" class="button button-outline" data-management-report="weekly">Weekly report</button>'
+        + '<button type="button" class="button button-outline" data-management-report="monthly">Monthly report</button>'
+        + '<button type="button" class="button button-outline" data-management-report="ytd">YTD report</button>'
+        + '</div>'
+        + '<p class="ps-award-note">Choose a report, then Excel or PDF. The selected day anchors daily/weekly reports; otherwise they end at the selected month’s latest available date. The weekly range may cross month boundaries. No automatic email delivery is scheduled.</p>',
+    );
+  }
+
+  async function exportManagementReport(kind, format = "excel") {
+    if (!["manager", "district_manager", "admin"].includes(currentProfile?.role) || activePage !== "overview") return;
+    if (liveData?.exportWarnings?.length) throw new Error("Some sales datasets failed to load. Reload successfully before exporting management reports.");
+    const owner = currentProfile.id, sessionClient = client;
+    const { buildManagementReport } = await import("./management-reports.mjs");
+    if (currentProfile?.id !== owner || client !== sessionClient || activePage !== "overview") return;
+    const stamp = localISODate();
+    const result = buildManagementReport({
+      kind, month: ui.month, day: ui.period === "day" ? periodDay() : null, today: stamp,
+      branches: liveData.branches, profiles: liveData.profiles, sales: liveData.sales,
+      branchIds: scopeBranchIds(),
+      isTestSale: sale => isTestSale(sale, liveData.testPsIds),
+      linesForSale,
+      amountForLine: line => window.BranchlineAnalytics.salesLineAmount(line, ui.salesBasis),
+      basis: ui.salesBasis === "srp" ? "SRP comparison — selling-price fallback" : "Selling price",
+    });
+    const name = "branchline-management-" + kind + "-" + stamp;
+    if (format === "pdf") {
+      const sheets = ui.salesBasis === "srp"
+        ? [{ name: "Comparison basis", rows: [
+            ["Sales comparison basis", salesBasisNote()],
+            ["Original records", "Prices, product records and monthly targets are unchanged."],
+          ] }, ...result.sheets] : result.sheets;
+      return downloadReportPdf(sheets, name, undefined, { reportCharts: result.charts });
+    }
+    return exportWorkbook(result.sheets, name, false, format);
+  }
+
+  function psRankingPanel() {
+    if (currentProfile.role === "ps") return "";
+
+    // Retain one sortable and paginated ranking table. Clear removed card
+    // filters, so saved selections cannot silently limit the table or awards.
+    ui.rankBrand = "";
+    ui.rankCategory = "";
+    ui.rankSub = "";
+    ui.rankBranch = "";
+
+    const scope = scopeBranchIds();
+    const awardees = psAwardRankingRows(scope);
+    const ranking = psRankingRows(scope);
+    const canPrintCertificates = !demoStore && ["manager", "district_manager", "admin"].includes(currentProfile?.role);
+    const awardButton = !canPrintCertificates ? "" : '<button type="button" class="button button-outline ps-award-batch" data-award-top10 '
+      + (awardees.length ? "" : "disabled") + ' aria-label="Download printable Top 10 Product Specialist certificates">Print PS Certificates (PDF)</button>';
+    const table = tableBlock(
+      "psrank",
+      ["Rank", "Product Specialist", "Sales Code", "Brand", "Branch", "Total sales", "Equal PS target", "Achievement"],
+      ranking,
+      row => '<tr class="rank-row" data-ps-detail="' + escapeHTML(row.id) + '" tabindex="0"><td><strong>#'
+        + row.rank + '</strong></td><td><strong>' + escapeHTML(row.name) + '</strong></td><td>'
+        + escapeHTML(row.salesCode || "—") + '</td><td>' + escapeHTML(row.brand) + '</td><td>'
+        + escapeHTML(row.branch) + '</td><td>' + formatMoney(row.total) + '</td><td>'
+        + (row.target ? formatMoney(row.target) : "—") + '</td><td>'
+        + (row.achievement === null || row.achievement === undefined ? "—" : percent(row.achievement, 100)) + '</td></tr>',
+      "No Product Specialists match this selection.",
+    );
+    return panel(
+      "Product Specialist ranking",
+      periodLabel() + " · overall sales regardless of brand, highest first. Click a name to see their sales.",
+      table,
+      awardButton,
+    );
+  }
+
+
+  function matches(query, ...fields) {
+    return !query || fields.join(" ").toLowerCase().includes(query);
+  }
+
+  function searchQuery() {
+    return ui.search.trim().toLowerCase();
+  }
+
+  function pieChart(title, subtitle, entries, options = {}) {
+    const tableKey = options.tableKey || "brands";
+    const pieAction = `role="button" tabindex="0" data-pie-table="${escapeHTML(tableKey)}" aria-label="${escapeHTML(`View table for ${title}`)}"`;
+    const showLegend = options.legend !== false;
+    const showAmounts = options.amounts !== false;
+    const legendAmounts = showAmounts && currentProfile.role !== "ps";
+    const data = entries.filter(entry => entry.value > 0);
+    if (!entries.some(entry => entry.color)) data.sort((a, b) => b.value - a.value);
+    const shown = data.slice(0, 6);
+    const rest = data.slice(6).reduce((total, entry) => total + entry.value, 0);
+    if (rest > 0) shown.push({ label: "Others", value: rest });
+    const total = shown.reduce((sum, entry) => sum + entry.value, 0);
+    const chartTotal = entries.filter(entry => entry.value > 0).reduce((sum, entry) => sum + entry.value, 0);
+    const chartRows = options.exportRows || [[title, subtitle], ["Label", ...(showAmounts ? ["Amount"] : []), "Share (%)"],
+      ...entries.filter(entry => entry.value > 0).map(entry => [entry.label, ...(showAmounts ? [entry.value] : []), chartTotal ? entry.value / chartTotal * 100 : 0])];
+    const heading = `<div class="connected-panel-heading"><div class="chart-heading"><h2>${escapeHTML(title)}</h2>${chartExport(title, chartRows)}</div><p>${escapeHTML(subtitle)}</p>${options.controls || ""}</div>`;
+    if (!total) {
+      return `<section class="connected-panel pie-card">${heading}<div class="empty-state" ${pieAction}>No sales recorded for this selection.</div>${options.footer || ""}</section>`;
+    }
+
+    shown.forEach(entry => {
+      if (!entry.percentText) entry.percentText = `${((entry.value / total) * 100).toFixed(PERCENT_DECIMALS)}%`;
+    });
+
+    let angle = -Math.PI / 2;
+    const slices = shown.map((entry, index) => {
+      const fraction = entry.value / total;
+      const color = entry.color || PIE_COLORS[index % PIE_COLORS.length];
+      const start = angle;
+      angle += fraction * Math.PI * 2;
+      const mid = (start + angle) / 2;
+      const glowClass = entry.glow ? ` pie-glow pie-glow-${entry.glow}` : "";
+      const tip = entry.muted ? "" : ` class="pie-slice${glowClass}" data-tip="${escapeHTML(`${entry.label}|${showAmounts ? formatMoney(entry.value) : ""}|${entry.percentText}`)}"`;
+      const shape = fraction > 0.9999
+        ? `<circle r="1" fill="${color}"${tip}></circle>`
+        : `<path${tip} d="M0 0 L${Math.cos(start).toFixed(4)} ${Math.sin(start).toFixed(4)} A1 1 0 ${fraction > 0.5 ? 1 : 0} 1 ${Math.cos(angle).toFixed(4)} ${Math.sin(angle).toFixed(4)} Z" fill="${color}" stroke="#fff" stroke-width="0.02"></path>`;
+      const cx = (Math.cos(mid) * 0.62).toFixed(3);
+      const cy = Math.sin(mid) * 0.62;
+      const pctText = entry.labelText || `${(fraction * 100).toFixed(2)}%`;
+      let label = "";
+      if (!entry.muted && options.names && fraction >= 0.12) {
+        label = `<text x="${cx}" y="${(cy - 0.06).toFixed(3)}" text-anchor="middle" dominant-baseline="middle" class="pie-label pie-label-name">${escapeHTML(String(entry.label).slice(0, 10))}</text>`
+          + `<text x="${cx}" y="${(cy + 0.07).toFixed(3)}" text-anchor="middle" dominant-baseline="middle" class="pie-label">${pctText}</text>`;
+      } else if (!entry.muted && fraction >= 0.07) {
+        label = `<text x="${cx}" y="${cy.toFixed(3)}" text-anchor="middle" dominant-baseline="middle" class="pie-label">${pctText}</text>`;
+      }
+      return { shape, label, color, entry, fraction };
+    });
+    const legend = showLegend ? `<ul class="pie-legend">${slices.filter(slice => !slice.entry.muted).map(slice =>
+      `<li><i style="background:${slice.color}"></i><span>${escapeHTML(slice.entry.label)}</span><strong>${legendAmounts ? `${formatMoney(slice.entry.value)} · ` : ""}${slice.entry.percentText || `${(slice.fraction * 100).toFixed(2)}%`}</strong></li>`
+    ).join("")}</ul>` : "";
+    const description = shown.filter(entry => !entry.muted).map(entry => showAmounts ? `${entry.label} ${formatMoney(entry.value)}` : `${entry.label} ${entry.percentText}`).join("; ");
+    return `<section class="connected-panel pie-card">${heading}
+      <div class="pie-body${showLegend ? "" : " pie-body-solo"}" ${pieAction}><svg viewBox="-1.03 -1.03 2.06 2.06" role="img" aria-label="${escapeHTML(`${title}: ${description}`)}">${slices.map(slice => slice.shape).join("")}${slices.map(slice => slice.label).join("")}</svg>
+      ${legend}</div>${options.footer || ""}</section>`;
+  }
+
+  // Share of the target that should be reached by today: 1 for finished months, 0 for future ones,
+  // and the share of selling days elapsed for the current month. Year-to-date weights each month by its own target.
+  function paceFraction(scopeIds) {
+    const A = window.BranchlineAnalytics;
+    const today = localISODate();
+    const rules = calendarForecastRules(scopeIds);
+    const monthFraction = month => {
+      if (month < today.slice(0, 7)) return 1;
+      if (month > today.slice(0, 7)) return 0;
+      const refDate = ui.period === "day" && periodDay() < today ? periodDay() : today;
+      const fraction = A.expectedFraction({ month, refDate, rules, partialDay: refDate === today });
+      return fraction ?? 1;
+    };
+    if (ui.period !== "year") return monthFraction(anchorMonth());
+    let weighted = 0;
+    let total = 0;
+    liveData.targets.forEach(row => {
+      if ((scopeIds && !scopeIds.has(row.branch_id)) || !targetInPeriod(row.month)) return;
+      const amount = Number(row.amount);
+      total += amount;
+      weighted += amount * monthFraction(row.month.slice(0, 7));
+    });
+    return total > 0 ? weighted / total : monthFraction(anchorMonth());
+  }
+
+  // Red = behind pace, green = on pace, blue = target reached or exceeded.
+  function paceStatus(actual, target) {
+    if (actual >= target) return { key: "exceeded", color: "#355ee8", label: "Target reached" };
+    const expected = paceFraction();
+    if (actual >= target * expected) return { key: "on", color: "#16a34a", label: "On pace" };
+    return { key: "behind", color: "#dc2626", label: "Behind pace" };
+  }
+
+  function progressChart(actual, target, subtitle, options = {}) {
+    options = { tableKey: currentProfile.role === "ps" ? "sales" : "branches", ...options };
+    const title = options.title || "Target progress";
+    if (!(target > 0)) {
+      return `<section class="connected-panel pie-card"><div class="connected-panel-heading"><div class="chart-heading"><h2>${escapeHTML(title)}</h2>${chartExport(title, [[title, subtitle], ["Status"], [options.emptyText || "No target is set for this selection."]])}</div><p>${escapeHTML(subtitle)}</p></div><div class="empty-state" role="button" tabindex="0" data-pie-table="${escapeHTML(options.tableKey)}" aria-label="${escapeHTML(`View table for ${title}`)}">${escapeHTML(options.emptyText || "No target is set for this selection.")}</div></section>`;
+    }
+    const showAmounts = options.amounts !== false;
+    const status = paceStatus(actual, target);
+    const expected = paceFraction();
+    const paceText = `${status.label}${status.key === "exceeded" ? "" : ` (expected ${(expected * 100).toFixed(1)}% by now)`}`;
+    return pieChart(
+      title,
+      `${showAmounts ? `Target ${formatMoney(target)} · ${subtitle}` : subtitle} · ${paceText}`,
+      [
+        { label: options.currentLabel || "Current sales", value: Math.min(actual, target), color: status.color, glow: { behind: "red", on: "green", exceeded: "blue" }[status.key], percentText: percent(actual, target), labelText: percent(actual, target, 2) },
+        { label: "Remaining", value: Math.max(target - actual, 0), color: "#e2e8f0", muted: true },
+      ],
+      { ...options, exportRows: [[title, subtitle], ["Metric", "Value"], ["Actual sales", actual], ["Target", target], ["Remaining", Math.max(target - actual, 0)], ["Achievement (%)", actual / target * 100]] },
+    );
+  }
+
+  // Product Specialists see brand shares as percentages only, never amounts.
+  function brandPie(title, subtitle, entries) {
+    return currentProfile.role === "ps"
+      ? pieChart(title, subtitle, entries, { amounts: false, names: true })
+      : pieChart(title, subtitle, entries);
+  }
+
+  const tableStore = {};
+  const columnTables = new Map();
+  const SELECT_HEADER = "__select__";
+  const isDataHeader = header => header !== "" && header !== SELECT_HEADER;
+
+  // Sorts rows by the text of one column (numbers, money and percentages compare numerically; a data-sort attribute overrides the text).
+  function sortedItems(items, rowHtml, sort, sortValue) {
+    const cells = sortValue ? items.map(item => sortValue(item, sort.col)) :
+      tableCells(items, rowHtml, [sort.col]).map(row => row.get(sort.col));
+    const keys = cells.map(value => {
+      const text = String(value ?? "").trim();
+      const number = /\d/.test(text) ? Number(text.replace(/[₱,%#+\s]/g, "")) : NaN;
+      return { text, number: Number.isNaN(number) ? null : number, empty: !text || text === "—" };
+    });
+    const direction = sort.dir === "desc" ? -1 : 1;
+    return items
+      .map((item, index) => ({ item, index, key: keys[index] }))
+      .sort((a, b) => {
+        if (a.key.empty !== b.key.empty) return a.key.empty ? 1 : -1;
+        let result;
+        if (a.key.number !== null && b.key.number !== null) result = a.key.number - b.key.number;
+        else result = natural(a.key.text, b.key.text);
+        return (result * direction) || a.index - b.index;
+      })
+      .map(entry => entry.item);
+  }
+
+  function tableCells(items, rowHtml, columns, forDisplay = false) {
+    const doc = new DOMParser().parseFromString(`<table><tbody>${items.map(rowHtml).join("")}</tbody></table>`, "text/html");
+    return [...doc.querySelectorAll("tbody > tr")].map(row => new Map(columns.map(col => {
+      const cell = row.children[col];
+      const value = forDisplay ? cell?.dataset.filterValue : cell?.dataset.sort;
+      return [col, value ?? cell?.textContent ?? ""];
+    })));
+  }
+
+  const filterValue = value => String(value ?? "").trim();
+  function filterTableItems(items, filters, rowHtml, valueAt) {
+    const columns = Object.keys(filters).map(Number);
+    if (!columns.length || !items.length) return items;
+    const cells = valueAt ? null : tableCells(items, rowHtml, columns, true);
+    return items.filter((item, index) => columns.every(col =>
+      filters[col].has(filterValue(valueAt ? valueAt(item, col) : cells[index]?.get(col)))));
+  }
+
+  function columnHeading(label, active, filtered, attributes) {
+    const ariaSort = active === "asc" ? "ascending" : active === "desc" ? "descending" : "none";
+    return `<th aria-sort="${ariaSort}"><button class="sort-btn" type="button" ${attributes} aria-haspopup="dialog"
+      aria-label="Sort and filter ${escapeHTML(label)}${filtered ? " (filtered)" : ""}">${escapeHTML(label)}
+      <span class="sort-arrow" aria-hidden="true">${active === "asc" ? "▲" : active === "desc" ? "▼" : "▾"}</span>${filtered ? ' <span class="customer-filter-indicator" aria-hidden="true">•</span>' : ""}</button></th>`;
+  }
+
+  function tableHeading(key, header, col) {
+    const sort = ui.sort[key];
+    return columnHeading(header, sort?.col === col ? sort.dir : "", Boolean(ui.columnFilters[key]?.[col]),
+      `data-sort-table="${escapeHTML(key)}" data-sort-col="${col}"`);
+  }
+
+  function tableBlock(key, headers, items, rowHtml, emptyText, pageSize = PAGE_SIZE, sortValue, displayValue, { fixedRows = false } = {}) {
+    columnTables.set(key, { headers, items, rowHtml, displayValue });
+    items = filterTableItems(items, ui.columnFilters[key] ?? {}, rowHtml, displayValue);
+    const sort = ui.sort[key];
+    if (sort && isDataHeader(headers[sort.col] ?? "")) items = sortedItems(items, rowHtml, sort, sortValue);
+    tableStore[key] = { headers, items, rowHtml };
+    const pages = Math.max(1, Math.ceil(items.length / pageSize));
+    const page = Math.min(Math.max(1, ui.pages[key] || 1), pages);
+    ui.pages[key] = page;
+    const slice = items.slice((page - 1) * pageSize, page * pageSize);
+    const body = slice.length ? slice.map(rowHtml).join("") :
+      `<tr><td colspan="${headers.length}">${fixedRows ? escapeHTML(emptyText) : `<div class="empty-state">${escapeHTML(emptyText)}</div>`}</td></tr>`;
+    const padding = fixedRows ? `<tr aria-hidden="true"><td colspan="${headers.length}"></td></tr>`.repeat(pageSize - Math.max(1, slice.length)) : "";
+    const from = slice.length ? (page - 1) * pageSize + 1 : 0;
+    const to = slice.length ? from + slice.length - 1 : 0;
+    const head = headers.map((header, col) => {
+      if (header === SELECT_HEADER) return `<th class="select-cell"><input type="checkbox" data-product-select-all ${productsFiltered.length && productSelection.size === productsFiltered.length ? "checked" : ""} aria-label="Select all products"></th>`;
+      if (!isDataHeader(header)) return "<th></th>";
+      return tableHeading(key, header, col);
+    }).join("");
+    return `<div class="connected-table-wrap" data-table-key="${key}"><table class="connected-table"><thead><tr>${head}</tr></thead><tbody>${body}${padding}</tbody></table></div>
+      <div class="connected-pager"><span>${from}–${to} of ${items.length}</span>
+        <div><button class="button button-outline" type="button" data-pager="${key}" data-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>Previous</button><span>Page ${page} of ${pages}</span><button class="button button-outline" type="button" data-pager="${key}" data-page="${page + 1}" ${page >= pages ? "disabled" : ""}>Next</button></div></div>`;
+  }
+
+  // Like tableBlock, but without paging or auto-export: for small tables that have their own Export button or total row.
+  function sortableTable(key, headers, items, rowHtml, footerHtml = "") {
+    columnTables.set(key, { headers, items, rowHtml });
+    const filtered = filterTableItems(items, ui.columnFilters[key] ?? {}, rowHtml);
+    if (tableStore[key]?.items === items) tableStore[key].items = filtered;
+    const sort = ui.sort[key];
+    const shown = sort ? sortedItems(filtered, rowHtml, sort) : filtered;
+    const head = headers.map((header, col) => isDataHeader(header) ? tableHeading(key, header, col) : "<th></th>").join("");
+    const empty = !shown.length && items.length
+      ? `<tr><td colspan="${headers.length}">No rows match these filters.</td></tr>` : "";
+    return `<div class="connected-table-wrap"><table class="connected-table"><thead><tr>${head}</tr></thead><tbody>${shown.map(rowHtml).join("")}${empty || footerHtml}</tbody></table></div>`;
+  }
+
+  // Exports a table that is not built with tableBlock; returns the Export button for the panel header.
+  function manualExport(key, title, headers, items, rowHtml) {
+    tableStore[key] = { headers, items, rowHtml, title };
+    return exportButton(`data-export-table="${escapeHTML(key)}"`, `Download ${title}`);
+  }
+
+  function panel(title, detail, content, action = "", sourceKey = "") {
+    const key = /data-table-key="([^"]+)"/.exec(content)?.[1];
+    if (key && key !== "sales") {
+      if (tableStore[key]) tableStore[key].title = title;
+      action = `${action}${exportButton(`data-export-table="${escapeHTML(key)}"`, `Download ${title}`)}`;
+    }
+    return `<section class="connected-panel"${sourceKey || key ? ` data-pie-source="${escapeHTML(sourceKey || key)}"` : ""}><div class="connected-panel-heading panel-heading-row"><div><h2>${escapeHTML(title)}</h2>${detail ? `<p>${escapeHTML(detail)}</p>` : ""}</div>${action ? `<div class="panel-actions">${action}</div>` : ""}</div>${content}</section>`;
+  }
+
+  function salesBasisNote() {
+    return ui.salesBasis === "srp"
+      ? "SRP comparison - mixed basis: recorded SRP x quantity where available; missing SRPs and summary-only totals/channels use selling price. Targets stay unchanged. Display only; saved sales and DG fees are unchanged."
+      : "Selling Price x quantity. Display-only sales comparison; saved sales, targets and DG fees are unchanged.";
+  }
+
+  function filterBar(options) {
+    const controls = [];
+    if (universalPages.has(activePage)) {
+      controls.push(`<label class="field"><span>Sales comparison basis</span><select data-filter="salesBasis"><option value="price" ${ui.salesBasis !== "srp" ? "selected" : ""}>Selling Price</option><option value="srp" ${ui.salesBasis === "srp" ? "selected" : ""}>SRP (selling-price fallback)</option></select></label>`);
+    }
+    if (options.district && liveData.districts.length > 1) {
+      const districts = [...liveData.districts].sort((a, b) => natural(a.name, b.name));
+      controls.push(`<label class="field"><span>District</span><select data-filter="district"><option value="">All districts</option>${districts.map(district =>
+        `<option value="${escapeHTML(district.id)}" ${ui.district === district.id ? "selected" : ""}>${escapeHTML(district.name)}</option>`).join("")}</select></label>`);
+    }
+    if (options.branch) {
+      const branches = liveData.branches
+        .filter(branch => !ui.district || branch.district_id === ui.district)
+        .sort((a, b) => natural(a.name, b.name));
+      if (branches.length > 1) {
+        controls.push(`<label class="field"><span>Branch</span><select data-filter="branch"><option value="">All branches</option>${branches.map(branch =>
+          `<option value="${escapeHTML(branch.id)}" ${ui.branch === branch.id ? "selected" : ""}>${escapeHTML(branch.name)}</option>`).join("")}</select></label>`);
+      }
+    }
+    if (options.period) {
+      const periods = [["year", "Year to date (YTD)"], ["month", "Month to date (MTD)"], ["day", "Day (calendar)"]];
+      controls.push(`<label class="field"><span>Period</span><select data-filter="period">${periods.map(([value, label]) =>
+        `<option value="${value}" ${ui.period === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>`);
+      if (ui.period === "day") {
+        controls.push(`<label class="field"><span>Day</span><input type="date" data-filter="date" value="${escapeHTML(periodDay())}" required></label>`);
+      } else {
+        controls.push(`<label class="field"><span>${ui.period === "year" ? "Through month" : "Month"}</span><select data-filter="month">${availableMonths().map(month =>
+          `<option value="${month}" ${ui.month === month ? "selected" : ""}>${escapeHTML(monthLabel(month))}</option>`).join("")}</select></label>`);
+      }
+    }
+    if (options.search) {
+      controls.push(`<label class="field field-search"><span>Search</span><input type="search" data-filter="search" placeholder="${escapeHTML(options.search)}" value="${escapeHTML(ui.search)}" autocomplete="off"></label>`);
+    }
+    if (universalPages.has(activePage)) {
+      if (options.extra) controls.push(options.extra);
+      return `<div class="universal-filter-row"><details class="universal-filters" ${ui.filtersOpen ? "open" : ""}><summary><strong>Filters</strong><span data-filter-summary></span></summary><div class="universal-filter-body"><div class="connected-filters" role="group" aria-label="Filters">${controls.join("")}</div><div data-panel-filters></div></div></details>${options.actions ? `<div class="filter-actions">${options.actions}</div>` : ""}</div>`;
+    }
+    if (options.actions) controls.push(`<div class="filter-actions">${options.actions}</div>`);
+    return controls.length ? `<div class="connected-filters" role="group" aria-label="Filters">${controls.join("")}</div>` : "";
+  }
+
+  function pageHeading(title, detail) {
+    return `<div class="connected-heading"><span class="eyebrow">${escapeHTML(roleLabels[currentProfile.role]).toUpperCase()}</span><h1>${escapeHTML(title)}</h1><p>${escapeHTML(detail)}</p></div>`;
+  }
+
+  function mountPage(heading, beforeFilters, filters, results) {
+    if (collectingExports) return results();
+    if (capturingPieResults) return results;
+    hideInventorySerialTip();
+    if (pieTablePopup) closeModal();
+    const strip = connectedContent.querySelector(".inventory-tabs");
+    if (strip && beforeFilters.startsWith('<nav class="inventory-tabs"')) {
+      const template = document.createElement("template");
+      template.innerHTML = beforeFilters;
+      const next = template.content.firstElementChild;
+      const buttons = [...strip.querySelectorAll("[data-inventory-tab]")];
+      const nextButtons = [...next.querySelectorAll("[data-inventory-tab]")];
+      if (buttons.length === nextButtons.length && buttons.every((button,index) => button.dataset.inventoryTab === nextButtons[index].dataset.inventoryTab)) {
+        buttons.forEach((button,index) => {
+          button.className = nextButtons[index].className;
+          button.setAttribute("aria-current",nextButtons[index].getAttribute("aria-current"));
+          if (button.textContent !== nextButtons[index].textContent) button.textContent = nextButtons[index].textContent;
+        });
+      } else strip.replaceChildren(...next.childNodes);
+      for (const child of [...connectedContent.children]) if (child !== strip) child.remove();
+      strip.insertAdjacentHTML("beforebegin",heading);
+      strip.insertAdjacentHTML("afterend",`${filters}<div id="live-results"></div>`);
+    } else connectedContent.innerHTML = `${heading}${beforeFilters}${filters}<div id="live-results"></div>`;
+    resultsView = results;
+    refreshResults();
+  }
+
+  function refreshResults() {
+    const container = document.querySelector("#live-results");
+    if (container && resultsView) container.innerHTML = `${universalPages.has(activePage) ? `<p class="an-note" data-sales-basis-note>${escapeHTML(salesBasisNote())}</p>` : ""}${resultsView()}`;
+    consolidatePanelFilters();
+    window.BranchlineTableUI?.enhanceSections(container, activePage);
+    if (pieTablePopup) renderPieTablePopup();
+  }
+
+  function consolidatePanelFilters() {
+    const details = connectedContent.querySelector(".universal-filters");
+    if (!details) return;
+    const destination = details.querySelector("[data-panel-filters]");
+    destination.replaceChildren();
+    for (const heading of connectedContent.querySelectorAll("#live-results .connected-panel-heading")) {
+      const fields = [...heading.querySelectorAll("[data-filter]")];
+      if (!fields.length) continue;
+      const group = document.createElement("fieldset");
+      group.className = "universal-panel-filters";
+      const legend = document.createElement("legend");
+      legend.textContent = heading.querySelector("h2")?.textContent || "More filters";
+      group.append(legend);
+      for (const input of fields) {
+        const label = input.closest("label");
+        if (label) {
+          label.querySelector("span")?.classList.remove("visually-hidden");
+          group.append(label);
+        }
+      }
+      for (const clear of heading.querySelectorAll("[data-log-clear]")) group.append(clear);
+      destination.append(group);
+    }
+    const district = liveData.districts.find(row => row.id === ui.district)?.name || "All districts";
+    const branch = liveData.branches.find(row => row.id === ui.branch)?.name || "All branches";
+    const period = activePage === "analytics" ? (ui.anRange === "all" ? "All-time" : monthLabel(ui.month)) : statusLabel();
+    const range = activePage === "sales" && (ui.logFrom || ui.logTo) ? `${ui.logFrom || "Start"} to ${ui.logTo || "Today"} (sales log)` : "";
+    details.querySelector("[data-filter-summary]").textContent = [district, branch, period, ui.salesBasis === "srp" ? "SRP / selling-price fallback" : "Selling Price", range, ui.search ? `Search: ${ui.search}` : ""].filter(Boolean).join(" · ");
+    details.ontoggle = () => {
+      ui.filtersOpen = details.open;
+      positionFloatingFilters();
+    };
+    positionFloatingFilters();
+  }
+
+  function positionFloatingFilters() {
+    const details = connectedContent.querySelector(".universal-filters[open]");
+    if (!details) return;
+    const bottom = details.querySelector("summary").getBoundingClientRect().bottom;
+    details.style.setProperty("--filter-available-height", `${Math.max(0, window.innerHeight - Math.max(0, bottom) - 16)}px`);
+  }
+
+  function dismissFloatingFilters(event) {
+    const details = connectedContent.querySelector(".universal-filters[open]");
+    if (!details) return;
+    if (event.type === "keydown" ? event.key !== "Escape" : details.contains(event.target)) return;
+    details.open = false;
+    ui.filtersOpen = false;
+    if (event.type === "keydown") details.querySelector("summary").focus();
+  }
+
+  document.addEventListener("pointerdown", dismissFloatingFilters);
+  document.addEventListener("keydown", dismissFloatingFilters);
+  window.addEventListener("resize", positionFloatingFilters);
+  window.addEventListener("scroll", positionFloatingFilters, { passive: true });
+
+  let capturingPieResults = false;
+  let collectingExports = false;
+  let pieTablePopup = null;
+
+  function openPieTable(key, trigger) {
+    let source = resultsView;
+    if (!document.querySelector(`#live-results [data-pie-source="${key}"]`)) {
+      if (key === "mix") source = () => overviewPaymentPanels("table");
+      else if (key === "branches" && currentProfile.role !== "ps") source = branchPerformancePanel;
+      else if (key === "brands") source = brandPerformancePanel;
+      else if (key === "brandlog" && currentProfile.role === "ps") source = brandLogPanel;
+      else if (!["sales", "brandlog", "dailysum"].includes(key)) {
+        alert("The table is not available in this view.");
+        return;
+      } else {
+        capturingPieResults = true;
+        try { source = renderSalesPage(key === "dailysum"); }
+        finally { capturingPieResults = false; }
+      }
+    }
+    closeModal();
+    modalRoot = document.createElement("div");
+    modalRoot.className = "dlg-backdrop";
+    modalRoot.innerHTML = `<div class="dlg dlg-xwide" role="dialog" aria-modal="true" aria-label="Chart table"><div class="dlg-head"><h2>Chart table</h2><button class="dlg-close" type="button" data-modal-close aria-label="Close">×</button></div><div class="dlg-form" data-pie-table-content></div></div>`;
+    connectedContent.appendChild(modalRoot);
+    pieTablePopup = { key, source, trigger, label: trigger.getAttribute("aria-label") };
+    modalRoot.addEventListener("pointerdown", event => {
+      if (event.target === modalRoot) closeModal();
+    });
+    modalRoot.addEventListener("click", event => {
+      if (event.target.closest("[data-modal-close]")) {
+        event.stopPropagation();
+        closeModal();
+      }
+    });
+    modalRoot.addEventListener("keydown", event => {
+      if (event.key !== "Tab") return;
+      const controls = [...modalRoot.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]')];
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && event.target === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && event.target === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+    hidePieTip();
+    renderPieTablePopup();
+    modalRoot?.querySelector("[data-modal-close]").focus();
+  }
+
+  function renderPieTablePopup() {
+    const template = document.createElement("template");
+    template.innerHTML = pieTablePopup.source();
+    const source = template.content.querySelector(`[data-pie-source="${pieTablePopup.key}"]`);
+    if (!source) {
+      closeModal();
+      alert("The table is no longer available for this selection.");
+      return;
+    }
+    const title = source.querySelector("h2")?.textContent || "Chart table";
+    modalRoot.querySelector(".dlg-head h2").textContent = title;
+    modalRoot.querySelector('[role="dialog"]').setAttribute("aria-label", title);
+    if (ui.salesBasis === "srp") source.insertAdjacentHTML("afterbegin", `<p class="an-note">${escapeHTML(salesBasisNote())}</p>`);
+    modalRoot.querySelector("[data-pie-table-content]").replaceChildren(source);
+  }
+
+  function parkAccountControls() {
+    let parking = document.querySelector("#settings-control-parking");
+    if (!parking) {
+      parking = document.createElement("div");
+      parking.id = "settings-control-parking";
+      parking.hidden = true;
+      connectedShell.append(parking);
+    }
+    for (const id of ["change-password", "push-toggle", "push-permission", "push-status"]) {
+      const control = document.getElementById(id);
+      if (control) parking.append(control);
+    }
+  }
+
+  function renderConnected() {
+    if (!currentProfile || !liveData) return;
+    parkAccountControls();
+    const pages = rolePages[currentProfile.role] || [];
+    connectedNav.innerHTML = pages.map(page =>
+      `<button type="button" class="connected-nav-link ${activePage === page ? "active" : ""}" data-live-page="${page}">${escapeHTML(pageLabels[page])}</button>`
+    ).join("");
+
+    if (activePage === "sales") renderSalesPage();
+    else if (activePage === "analytics") renderAnalyticsPage();
+    else if (activePage === "targets") renderTargetsPage();
+    else if (activePage === "products") renderProductsPage();
+    else if (activePage === "customers" && pages.includes("customers")) renderCustomersPage();
+    else if (activePage === "users") renderPeoplePage();
+    else if (activePage === "inventory") renderInventoryPage();
+    else if (activePage === "apps") renderApplicationsPage();
+    else if (activePage === "settings") renderSettingsPage();
+    else renderOverview();
+    renderDemoControls();
+    renderTransferAlerts();
+  }
+
+  // The application hub links independent deployments without exporting
+  // sessions, passwords, private photos, or cross-project Supabase credentials.
+  function renderApplicationsPage() {
+    const catalog = window.BranchlineApplications?.list || [];
+    const cards = catalog.map(app => {
+      const isCurrent = app.kind === "workspace";
+      // Only the installed Branchline PWA navigates approved same-origin apps in-place.
+      // Normal browser tabs keep opening separately; no credentials are forwarded.
+      const installedPwa = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+      const openInside = installedPwa && !isCurrent && new URL(app.url).origin === window.location.origin;
+      const actionTarget = openInside ? "_self" : "_blank";
+      const actionLabel = openInside ? "in the installed Branchline window" : "in a new tab";
+      const action = isCurrent
+        ? '<button class="button button-primary" type="button" id="branchline-app-sales">Open Sales Tracker</button>'
+        : `<a class="button button-outline" href="${escapeHTML(app.url)}" target="${actionTarget}" rel="noopener noreferrer" referrerpolicy="no-referrer" aria-label="Open ${escapeHTML(app.name)} ${actionLabel}">Open ${escapeHTML(app.name)} ↗</a>`;
+      return `<article class="branchline-app-card" aria-label="${escapeHTML(app.name)}">
+        <div class="branchline-app-card-top">
+          <span class="branchline-app-monogram" aria-hidden="true">${escapeHTML(app.monogram)}</span>
+          <span class="branchline-app-kind">${isCurrent ? "CURRENT WORKSPACE" : "SEPARATE APPLICATION"}</span>
+        </div>
+        <h2>${escapeHTML(app.name)}</h2>
+        <p>${escapeHTML(app.description)}</p>
+        <small>${escapeHTML(app.access)}</small>
+        <div class="branchline-app-action">${action}</div>
+      </article>`;
+    }).join("");
+    mountPage(
+      pageHeading("Branchline Applications", "Access Sales Tracker, PTG, MegaFrame Studio and Flyer Studio from one workspace."),
+      "", "",
+      () => `<p class="an-note branchline-app-notice">Opening a studio does not share your Branchline password or session. Access to each application remains subject to its own sign-in and permissions.</p>
+        <div class="branchline-app-grid" role="list" aria-label="Branchline application directory">${cards}</div>`
+    );
+    connectedContent.querySelector("#branchline-app-sales")?.addEventListener("click", () => {
+      activePage = "overview";
+      ui.search = "";
+      ui.pages = {};
+      connectedSidebar.classList.remove("open");
+      window.scrollTo(0, 0);
+      renderConnected();
+    });
+  }
+
+  function dangerZonePanel() {
+    return currentProfile.role === "admin" ? `<section class="panel danger-zone"><h2>Danger zone</h2><p>Permanently delete all districts, branches, staff logins, products, sales, targets and history. Administrator accounts and payment modes are kept. This cannot be undone.</p><button class="button button-danger" type="button" data-open="wipe">Delete all data</button></section>` : "";
+  }
+
+  function storeClosedDatesPanel() {
+    if (!["ps", "manager", "district_manager", "admin"].includes(currentProfile.role)) return "";
+    const canEditHolidays = ["admin", "district_manager"].includes(currentProfile.role);
+    const holidayRows = liveData.holidays.map(item => `<tr><td>${escapeHTML(item.date)}</td><td>${escapeHTML(item.label || "")}</td>${canEditHolidays ? `<td><button class="button button-outline" type="button" data-holiday-delete="${escapeHTML(item.date)}">Delete</button></td>` : ""}</tr>`).join("");
+    const holidayTable = liveData.holidays.length
+      ? `<div class="connected-table-wrap"><table class="connected-table"><thead><tr><th>Date</th><th>Label</th>${canEditHolidays ? "<th></th>" : ""}</tr></thead><tbody>${holidayRows}</tbody></table></div>`
+      : '<p class="an-note">No store-closed dates set.</p>';
+    return panel("Store-closed dates", canEditHolidays ? "Company-wide. These dates are skipped in forecasts." : "Company-wide. Managed by district managers and admins.",
+      `${canEditHolidays ? '<p><button class="button" type="button" data-open="holiday">Add date</button></p>' : ""}${holidayTable}`);
+  }
+
+  function renderSettingsPage() {
+    mountPage(pageHeading("Settings", "Imports, alerts and account settings available to your role."), "", "", () =>
+      (managesInventory() ? panel("Imports", "Import tools remain restricted to your role and assigned branches. Review and confirm before saving.",
+        `<button class="button button-primary" type="button" data-open="import-center">Import Center</button>${!demoStore && ["manager","district_manager","admin"].includes(currentProfile.role) ? ' <button class="button button-outline" type="button" data-open="promotion-review">Import promotion memo</button>' : ""}`) : "") +
+      panel("Account and device", demoStore ? "Password changes and device notifications are available after signing in to a real account." : "Change your password or manage this device's notifications.", '<div class="filter-actions" id="settings-account-controls"></div>') +
+      eventCalendarPanel() + climateReviewPanel() + storeClosedDatesPanel() + pushMessagesPanel() + dangerZonePanel());
+    const slot = connectedContent.querySelector("#settings-account-controls");
+    for (const id of ["change-password", "push-toggle", "push-permission", "push-status"]) {
+      const control = document.getElementById(id);
+      if (control) slot.append(control);
+    }
+  }
+
+  async function loadEventCalendar(dataClient = client) {
+    if (demoStore) return { demo: true, events: [], adjustments: [] };
+    const [events, adjustments] = await Promise.all([
+      fetchAllFrom(dataClient, "calendar_events", "*", [["id", true]]),
+      fetchAllFrom(dataClient, "forecast_event_adjustments", "*", [["id", true]]),
+    ]);
+    const failed = [events, adjustments].find(result => result.error);
+    if (failed) {
+      console.error("Event calendar unavailable", failed.error);
+      return { error: `Event calendar unavailable: ${failed.error.message}. Apply the event-calendar database update and reload.`, events: [], adjustments: [] };
+    }
+    return { events: events.data, adjustments: adjustments.data };
+  }
+
+  // On-app-opening daily event notices; this is not a remote push or an ad.
+  // Only events already accessible to this authenticated account can appear.
+  function showDailyCalendarEventNotices() {
+    const profile = currentProfile, context = liveData?.calendar;
+    if (!profile?.id || !context || context.error || context.demo || demoStore) return;
+    const date = localISODate();
+    const ids = scopeBranchIds();
+    const events = (context.events || []).filter(row => !row.cancelled_at
+      && window.BranchlineAnalytics.calendarOccursOn(row, date)
+      && (!row.branch_ids?.length || row.branch_ids.some(id => ids.has(id))))
+      .sort((a, b) => String(a.title || "").localeCompare(String(b.title || "")));
+    if (!events.length) return;
+    const storageKey = "branchline:calendar-notices:" + profile.id + ":" + date;
+    try { if (localStorage.getItem(storageKey) === "shown") return; }
+    catch { /* Restricted storage: still show this login's notices. */ }
+    try { localStorage.setItem(storageKey, "shown"); }
+    catch { /* Continue without persistence when storage is blocked. */ }
+    let index = 0;
+    const overlay = document.createElement("div");
+    overlay.className = "dlg-backdrop calendar-daily-notice-backdrop";
+    overlay.setAttribute("data-calendar-daily-notices", "");
+    const showNext = () => {
+      if (currentProfile?.id !== profile.id || index >= events.length) {
+        overlay.remove();
+        return;
+      }
+      const row = events[index];
+      overlay.innerHTML = `<div class="dlg dlg-wide calendar-daily-notice" role="dialog" aria-modal="true" aria-label="Today's calendar event">
+        <div class="dlg-head"><h2>Today's events · ${escapeHTML(date)}</h2>
+          <button type="button" class="dlg-close" data-calendar-next aria-label="Close event and continue">×</button></div>
+        <div class="dlg-form"><p class="dlg-intro">Event ${index + 1} of ${events.length}</p>
+          <div class="dlg-body calendar-event-detail">
+            <h3>${escapeHTML(row.title)}</h3>
+            <p>${escapeHTML(row.starts_on)} to ${escapeHTML(row.ends_on)} · ${escapeHTML(row.campaign_type || row.kind.replaceAll("_", " "))}</p>
+            <p>${escapeHTML(calendarScheduleLabel(row))}</p>
+            <p>${row.branch_ids?.length
+              ? escapeHTML(row.branch_ids.map(id => liveData.branches.find(b => b.id === id)?.name || "Authorized branch").join(", "))
+              : "Company-wide"}</p>
+            ${row.closed ? "<p><strong>Store closed</strong></p>" : ""}
+            ${row.notes ? `<p>${escapeHTML(row.notes)}</p>` : ""}
+            ${calendarMemoLinks(row)}
+          </div>
+          <div class="dlg-actions"><button type="button" class="button button-primary" data-calendar-next>${index + 1 < events.length ? "Next event" : "Done"}</button></div>
+        </div></div>`;
+      overlay.querySelector("[data-calendar-next]")?.focus({ preventScroll: true });
+    };
+    overlay.addEventListener("click", event => {
+      if (!event.target.closest("[data-calendar-next]")) return;
+      index++;
+      showNext();
+    });
+    overlay.addEventListener("keydown", event => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      index++;
+      showNext();
+    });
+    document.body.append(overlay);
+    showNext();
+  }
+
+  function calendarClosures() {
+    return (liveData.calendar?.events || []).filter(row => !row.cancelled_at && row.closed);
+  }
+
+  function calendarForecastRules(ids) {
+    const branches = liveData.branches.filter(row => !ids || ids.has(row.id));
+    const closures = calendarClosures();
+    return window.BranchlineAnalytics.makeRules(ui.anBasis, companyHolidayDates(),
+      branches.map(branch => closures.filter(row => !row.branch_ids.length || row.branch_ids.includes(branch.id))));
+  }
+
+  function canManageCalendarEvent(event) {
+    if (!["admin","district_manager","manager"].includes(currentProfile.role)) return false;
+    if (!event.branch_ids.length) return ["admin", "district_manager"].includes(currentProfile.role);
+    return event.branch_ids.every(id => liveData.branches.some(branch => branch.id === id));
+  }
+
+  function activeEventAdjustments(month) {
+    const context = liveData.calendar;
+    if (!context || context.error || context.demo) return [];
+    return context.adjustments.filter(row => !row.revoked_at && row.approved_by && row.month.slice(0,7) === month
+      && row.approved_at <= new Date().toISOString() && row.event_ids.length
+      && row.event_ids.every(id => context.events.some(event => event.id === id && !event.cancelled_at && !event.closed
+        && event.updated_at <= row.approved_at && (!event.branch_ids.length || event.branch_ids.includes(row.branch_id))
+        && window.BranchlineAnalytics.calendarOccursBetween(event, `${month}-01`, window.BranchlineAnalytics.monthEnd(month)))));
+  }
+
+  function eventCalendarPanel(ids) {
+    const context = liveData.calendar;
+    if (!context) return "";
+    if (context.error) return panel("Event calendar", "", `<p class="connected-error" role="alert">${escapeHTML(context.error)} Item forecasts are unavailable until calendar data can be loaded.</p>`);
+    const A = window.BranchlineAnalytics, month = ui.eventCalendarMonth || ui.inventoryForecastMonth || localISODate().slice(0,7);
+    const events = context.events.filter(row => !ids || !row.branch_ids.length || row.branch_ids.some(id => ids.has(id)));
+    const active = events.filter(row => !row.cancelled_at && row.starts_on <= A.monthEnd(month) && row.ends_on >= `${month}-01`);
+    const legacy = (liveData.holidays || []).filter(row => row.date.slice(0,7) === month);
+    const weekdays = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+    const offset = new Date(`${month}-01T00:00:00Z`).getUTCDay(), days = Number(A.monthEnd(month).slice(8));
+    const cells = Array.from({length:Math.ceil((offset+days)/7)*7},(_,index) => {
+      const day = index-offset+1;
+      if (day<1 || day>days) return "<td></td>";
+      const date = `${month}-${String(day).padStart(2,"0")}`;
+      const entries = active.filter(row=>A.calendarOccursOn(row,date));
+      const holidays = legacy.filter(row=>row.date===date);
+      const hasEvents = entries.length || holidays.length;
+      const closed = entries.some(row=>row.closed) || holidays.length;
+      const campaignStyles = [
+        ["major sale event","major-sale","Major Sale Event"],
+        ["major campaign","major-campaign","Major Campaign"],
+        ["special campaign","special-campaign","Special Campaign"],
+      ];
+      const campaign = closed ? null : campaignStyles.find(([type])=>entries.some(row=>String(row.campaign_type || "").trim().toLowerCase()===type));
+      const highlight = closed ? "Store closed" : campaign?.[2] || "";
+      const today = date === localISODate();
+      return `<td${today ? ' class="calendar-today"' : ""}>${hasEvents
+        ? `<button type="button" class="calendar-date calendar-date-event${closed ? " calendar-date-closed" : campaign ? ` calendar-date-${campaign[1]}` : ""}" data-event-date="${date}" data-event-branches="${escapeHTML(JSON.stringify(ids ? [...ids] : liveData.branches.map(row=>row.id)))}" aria-label="${escapeHTML(`${date}: ${entries.length+holidays.length} event(s)${highlight ? `, ${highlight}` : ""}. View details`)}" title="${escapeHTML(highlight || "Event details")}"${today ? ' aria-current="date"' : ""}>${day}</button>`
+        : `<span class="calendar-date"${today ? ' aria-current="date"' : ""}>${day}</span>`}</td>`;
+    });
+    const grid = `<table class="event-calendar" aria-label="Event calendar ${escapeHTML(month)}"><thead><tr>${weekdays.map(day=>`<th scope="col">${day}</th>`).join("")}</tr></thead><tbody>${Array.from({length:cells.length/7},(_,i)=>`<tr>${cells.slice(i*7,i*7+7).join("")}</tr>`).join("")}</tbody></table>`;
+    return panel("Event calendar", "",
+      `${context.demo ? "<p>Demo: calendar is empty; editing is available in a real account.</p>" : ""}
+      <label class="field"><span>Calendar month</span><input type="month" data-event-month value="${escapeHTML(month)}" required></label>
+      <div class="filter-actions">${["admin","district_manager","manager"].includes(currentProfile.role) && !context.demo ? '<button type="button" class="button" data-open="calendar-event">Add event / closure</button><button type="button" class="button button-outline" data-open="event-review">Review event demand adjustment</button>' : ""}</div>
+      ${grid}`);
+  }
+
+  function openCalendarDate(date, branches) {
+    const context = liveData.calendar;
+    if (!context || context.error) return alert(context?.error || "Event calendar unavailable. Reload the workspace.");
+    const ids = new Set(branches);
+    const events = context.events.filter(row=>!row.cancelled_at && window.BranchlineAnalytics.calendarOccursOn(row,date)
+      && (!row.branch_ids.length || row.branch_ids.some(id=>ids.has(id))));
+    const holidays = (liveData.holidays || []).filter(row=>row.date===date);
+    const applied = new Set(activeEventAdjustments(date.slice(0,7)).map(row=>row.id));
+    const reviews = context.adjustments.filter(row=>row.month.slice(0,7)===date.slice(0,7) && ids.has(row.branch_id)
+      && row.event_ids.some(id=>events.some(event=>event.id===id)));
+    openModal({title:`Events - ${date}`,readOnly:true,wide:true,
+      body:events.map(row=>`<section class="calendar-event-detail"><h3>${escapeHTML(row.title)}</h3><p>${escapeHTML(row.starts_on)} to ${escapeHTML(row.ends_on)} / ${escapeHTML(row.campaign_type || row.kind.replaceAll("_"," "))}${row.closed ? " / Store closed" : ""}</p><p>${escapeHTML(calendarScheduleLabel(row))}</p><p>${row.branch_ids.length ? escapeHTML(row.branch_ids.map(id=>liveData.branches.find(b=>b.id===id)?.name || "Other scoped branch").join(", ")) : "Company-wide"}</p>${row.notes ? `<p>${escapeHTML(row.notes)}</p>` : ""}${calendarMemoLinks(row)}${!context.demo && canManageCalendarEvent(row) ? `<div class="filter-actions"><button type="button" class="button" data-event-edit="${escapeHTML(row.id)}">Edit</button><button type="button" class="button" data-event-cancel="${escapeHTML(row.id)}">Cancel event</button></div>` : ""}</section>`).join("")
+        + holidays.map(row=>`<section class="calendar-event-detail"><h3>${escapeHTML(row.label || "Store closed")}</h3><p>Company-wide / Store closed</p></section>`).join("")
+        + (!events.length && !holidays.length ? "<p>No active events on this date.</p>" : "")
+        + (reviews.length ? `<details><summary>Event adjustment history</summary><ul>${reviews.map(row=>`<li>${escapeHTML(branchName(row.branch_id))} / ${escapeHTML(row.category)}: ${escapeHTML(row.percent)}% - ${escapeHTML(row.reason)}. ${row.revoked_at ? "Revoked/superseded" : applied.has(row.id) ? "Applied" : "Not applied"}.${["admin","district_manager","manager"].includes(currentProfile.role) && !context.demo && !row.revoked_at ? ` <button type="button" class="button" data-event-revoke="${escapeHTML(row.id)}">Revoke</button>` : ""}</li>`).join("")}</ul></details>` : ""),
+      onReady:form=>form.addEventListener("click",event=>{
+        const edit=event.target.closest("[data-event-edit]");
+        if(edit) { openCalendarEvent(edit.dataset.eventEdit); return; }
+        const cancel=event.target.closest("[data-event-cancel]");
+        if(cancel) { openEventAction(cancel.dataset.eventCancel); return; }
+        const revoke=event.target.closest("[data-event-revoke]");
+        if(revoke) openEventAction(revoke.dataset.eventRevoke,true);
+      }),
+    });
+  }
+
+  async function refreshEventCalendar() {
+    liveData.calendar = await loadEventCalendar();
+    refreshResults();
+    if (liveData.calendar.error) throw new Error(liveData.calendar.error);
+  }
+
+  function calendarScheduleLabel(event) {
+    return event.weekdays?.length ? `Weekly: ${event.weekdays.map(day=>["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"][day]).join(", ")}` : "Every day within the date range";
+  }
+
+  function validCalendarMemoURL(value) {
+    if (!/^https?:\/\/[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]+)?([/?#][^\s<>"\\]*)?$/.test(value)) return false;
+    try { const url = new URL(value); return Boolean(url.hostname) && !url.username && !url.password; }
+    catch { return false; }
+  }
+
+  function calendarMemoLinks(event) {
+    const links = event.memo_links || [];
+    if (!links.length) return "";
+    return `<ul class="calendar-memo-links">${links.map(link=>validCalendarMemoURL(link.url)
+      ? `<li><a href="${escapeHTML(link.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(link.label)}</a></li>`
+      : `<li role="alert">Invalid memo link: ${escapeHTML(link.label)}. Ask an event manager to correct it.</li>`).join("")}</ul>`;
+  }
+
+  function openCalendarEvent(id) {
+    if (!["admin","district_manager","manager"].includes(currentProfile.role) || demoStore) return;
+    const event = id ? liveData.calendar.events.find(row=>row.id===id) : null;
+    if (id && (!event || !canManageCalendarEvent(event))) return alert("This event is outside your management scope.");
+    const company = ["admin","district_manager"].includes(currentProfile.role);
+    const start = event?.starts_on || `${ui.eventCalendarMonth || localISODate().slice(0,7)}-01`;
+    const campaignTypes = ["Major Campaign","Major Sale Event","Special Campaign","Regular Campaign"];
+    const campaign = event?.campaign_type || "";
+    const memoRow = (link={label:"",url:""}) => `<div class="calendar-memo-row">
+      <label class="field"><span>Memo / mechanics name</span><input data-memo-label maxlength="120" value="${escapeHTML(link.label)}" required></label>
+      <label class="field"><span>Memo link (http/https)</span><input data-memo-url type="url" value="${escapeHTML(link.url)}" required></label>
+      <button type="button" class="button" data-remove-memo>Remove link</button></div>`;
+    openModal({title:event ? "Edit calendar event" : "Add calendar event / closure",
+      intro:"Enter a promo once with start/end dates and optional weekly days. Editing changes the entire series and revokes related demand approvals. Memo links are visible to everyone allowed to view the event; document sharing permissions still apply.",
+      body:`${company ? `<label><input name="company" type="checkbox" ${event && !event.branch_ids.length ? "checked" : ""}> Company-wide</label>` : ""}
+      <fieldset><legend>Affected branches</legend>${liveData.branches.map(branch=>`<label><input type="checkbox" name="branches" value="${escapeHTML(branch.id)}" ${event?.branch_ids.includes(branch.id) || !event && liveData.branches.length===1 ? "checked" : ""}> ${escapeHTML(branch.name)}</label>`).join("<br>")}</fieldset>
+      <label class="field"><span>Event title</span><input name="title" maxlength="120" value="${escapeHTML(event?.title || "")}" required></label>
+      <label class="field"><span>Event type</span>${selectHTML("kind",["promotion","mall_sale","holiday","local_event","closure","other"].map(value=>[value,value.replaceAll("_"," ")]),event?.kind || "promotion","required")}</label>
+      <label class="field"><span>Campaign type (optional)</span>${selectHTML("campaign",[["","Not specified"],...campaignTypes.map(value=>[value,value]),["__custom","Custom campaign type"]],campaignTypes.includes(campaign) ? campaign : campaign ? "__custom" : "")}</label>
+      <label class="field" data-custom-campaign><span>Custom campaign type</span><input name="customCampaign" maxlength="120" value="${escapeHTML(campaignTypes.includes(campaign) ? "" : campaign)}"></label>
+      <label class="field"><span>Start date</span><input name="starts" type="date" value="${escapeHTML(start)}" required></label>
+      <label class="field"><span>End date</span><input name="ends" type="date" value="${escapeHTML(event?.ends_on || start)}" required></label>
+      <label class="field"><span>Repeat</span>${selectHTML("repeat",[["daily","Every day in the range"],["weekly","Selected weekdays (weekly)"]],event?.weekdays?.length ? "weekly" : "daily")}</label>
+      <fieldset data-repeat-days><legend>Repeat on</legend>${["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"].map((day,index)=>`<label><input name="weekdays" type="checkbox" value="${index}" ${event?.weekdays?.includes(index) ? "checked" : ""}> ${day}</label>`).join(" ")}
+      <button type="button" class="button" data-weekend>Every weekend (Sat + Sun)</button></fieldset>
+      <p data-occurrence-preview role="status"></p>
+      <label><input name="closed" type="checkbox" ${event?.closed ? "checked" : ""}> Store closed on the scheduled dates</label>
+      <label class="field"><span>Details / evidence / promotion mechanics</span><textarea name="notes">${escapeHTML(event?.notes || "")}</textarea></label>
+      <fieldset><legend>Memo / mechanics links</legend><div data-memo-rows>${(event?.memo_links || []).map(memoRow).join("")}</div>
+      <button type="button" class="button" data-add-memo>Add memo link</button></fieldset>`,
+      onSubmit:async form=>{
+        const branches = form.elements.company?.checked ? [] : [...form.querySelectorAll('[name="branches"]:checked')].map(input=>input.value);
+        if (!form.elements.company?.checked && !branches.length) throw new Error("Event calendar: select at least one branch.");
+        if (form.elements.ends.value<form.elements.starts.value) throw new Error("Event calendar: end date cannot be before start date.");
+        const weekdays = form.elements.repeat.value==="weekly" ? [...form.querySelectorAll('[name="weekdays"]:checked')].map(input=>Number(input.value)) : [];
+        if(form.elements.repeat.value==="weekly" && !weekdays.length) throw new Error("Event calendar: select at least one weekday.");
+        if(!window.BranchlineAnalytics.calendarOccursBetween({starts_on:form.elements.starts.value,ends_on:form.elements.ends.value,weekdays},form.elements.starts.value,form.elements.ends.value))
+          throw new Error("Event calendar: the date range has no selected weekdays.");
+        const links = [...form.querySelectorAll(".calendar-memo-row")].map(row=>({label:row.querySelector("[data-memo-label]").value.trim(),url:row.querySelector("[data-memo-url]").value.trim()}));
+        if(links.some(link=>!link.label || !validCalendarMemoURL(link.url))) throw new Error("Event calendar: each memo needs a name and a valid http/https link without credentials or whitespace.");
+        const campaignType = form.elements.campaign.value==="__custom" ? form.elements.customCampaign.value.trim() : form.elements.campaign.value;
+        if(form.elements.campaign.value==="__custom" && !campaignType) throw new Error("Event calendar: enter a custom campaign type.");
+        checkResult(await client.rpc("save_calendar_campaign",{p_id:event?.id || null,p_branches:branches,p_title:form.elements.title.value,
+          p_kind:form.elements.kind.value,p_from:form.elements.starts.value,p_to:form.elements.ends.value,
+          p_closed:form.elements.closed.checked,p_notes:form.elements.notes.value,p_weekdays:weekdays,p_campaign_type:campaignType,p_memo_links:links}),"Unable to save event calendar");
+        await refreshEventCalendar();
+      },
+      onReady:form=>{
+        const update=()=>{
+          form.querySelectorAll('[name="branches"]').forEach(input=>{input.disabled=Boolean(form.elements.company?.checked);});
+          if(form.elements.kind.value==="closure") form.elements.closed.checked=true;
+          form.elements.closed.disabled=form.elements.kind.value==="closure";
+          const custom=form.elements.campaign.value==="__custom";
+          form.querySelector("[data-custom-campaign]").hidden=!custom;
+          form.elements.customCampaign.required=custom;
+          form.querySelector("[data-repeat-days]").hidden=form.elements.repeat.value!=="weekly";
+          const weekdays=[...form.querySelectorAll('[name="weekdays"]:checked')].map(input=>Number(input.value));
+          const from=form.elements.starts.value,to=form.elements.ends.value;
+          let count=0;
+          if(from && to && from<=to && (form.elements.repeat.value!=="weekly" || weekdays.length)){
+            const start=new Date(`${from}T00:00:00Z`),end=new Date(`${to}T00:00:00Z`);
+            const days=Math.floor((end-start)/86400000)+1;
+            if(form.elements.repeat.value==="daily") count=days;
+            else for(const day of weekdays) {const offset=(day-start.getUTCDay()+7)%7;if(offset<days)count+=Math.floor((days-1-offset)/7)+1;}
+          }
+          form.querySelector("[data-occurrence-preview]").textContent=`${count} scheduled date${count===1 ? "" : "s"} in this range.`;
+        };
+        form.addEventListener("change",update);
+        form.addEventListener("click",event=>{
+          if(event.target.closest("[data-weekend]")){
+            form.elements.repeat.value="weekly";form.querySelectorAll('[name="weekdays"]').forEach(input=>{input.checked=["0","6"].includes(input.value);});update();
+          }
+          if(event.target.closest("[data-add-memo]")) form.querySelector("[data-memo-rows]").insertAdjacentHTML("beforeend",memoRow());
+          event.target.closest("[data-remove-memo]")?.closest(".calendar-memo-row").remove();
+        });
+        update();
+      },
+    });
+  }
+
+  function openEventReview() {
+    if(!["admin","district_manager","manager"].includes(currentProfile.role) || demoStore) return;
+    const categories=[...new Set((liveData.inventoryCatalog || []).map(row=>String(row.category || "").trim()).filter(Boolean))].sort(natural);
+    openModal({title:"Approve combined event demand adjustment",submitLabel:"Approve adjustment",
+      intro:"Choose the events supporting ONE combined monthly estimate for this branch/category. The percentage is not prefilled. It replaces the existing event approval; editing/cancelling any referenced event revokes it. Climate is separate: do not count it twice.",
+      body:`<label class="field"><span>Branch</span>${selectHTML("branch",liveData.branches.map(row=>[row.id,row.name]),"","required")}</label>
+      <label class="field"><span>Forecast month</span><input name="month" type="month" value="${escapeHTML(ui.eventCalendarMonth || ui.inventoryForecastMonth || localISODate().slice(0,7))}" required></label>
+      <fieldset><legend>Open-store events overlapping this month</legend><div data-event-choices></div></fieldset>
+      <label class="field"><span>Category</span>${selectHTML("category",[["","Choose category"],...categories.map(value=>[value,value])],"","required")}</label>
+      <label class="field"><span>Combined monthly event adjustment %</span><input name="percent" type="number" step="any" min="-100" required></label>
+      <label class="field"><span>Evidence and justification for the combined monthly percentage</span><textarea name="reason" minlength="15" required></textarea></label>
+      <label><input type="checkbox" required> I reviewed these events and avoided double-counting seasonal or climate effects.</label>`,
+      onReady:form=>{
+        const fill=()=>{
+          const month=form.elements.month.value, branch=form.elements.branch.value;
+          if(!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) { form.querySelector("[data-event-choices]").textContent="Choose a valid forecast month."; return; }
+          const events=(liveData.calendar?.events || []).filter(row=>!row.cancelled_at && !row.closed
+            && (!row.branch_ids.length || row.branch_ids.includes(branch)) && window.BranchlineAnalytics.calendarOccursBetween(row,`${month}-01`,window.BranchlineAnalytics.monthEnd(month)));
+          form.querySelector("[data-event-choices]").innerHTML=events.length ? events.map(row=>`<label><input name="events" type="checkbox" value="${escapeHTML(row.id)}"> ${escapeHTML(row.title)} (${escapeHTML(row.starts_on)} to ${escapeHTML(row.ends_on)})</label>`).join("<br>") : "<p>No eligible events. Add an open-store event for this branch and month first.</p>";
+        };
+        form.elements.branch.addEventListener("change",fill);form.elements.month.addEventListener("change",fill);fill();
+      },
+      onSubmit:async form=>{
+        const events=[...form.querySelectorAll('[name="events"]:checked')].map(input=>input.value);
+        if(!events.length) throw new Error("Event calendar: select at least one eligible event.");
+        checkResult(await client.rpc("approve_event_adjustment",{p_branch:form.elements.branch.value,p_events:events,p_category:form.elements.category.value,
+          p_month:form.elements.month.value+"-01",p_percent:Number(form.elements.percent.value),p_reason:form.elements.reason.value}),"Unable to approve event adjustment");
+        await refreshEventCalendar();
+      },
+    });
+  }
+
+  function openEventAction(id, revoke=false) {
+    if(!["admin","district_manager","manager"].includes(currentProfile.role) || demoStore) return;
+    openModal({title:revoke ? "Revoke event adjustment" : "Cancel calendar event",submitLabel:revoke ? "Revoke" : "Cancel event",
+      intro:revoke ? "Keep the audit record but stop applying this event percentage." : "Remove this event's closure/demand effects. Related approvals are revoked; records remain in the audit.",
+      body:"<p>This does not delete historical sales or change existing company store-closed dates.</p>",
+      onSubmit:async()=>{
+        checkResult(await client.rpc(revoke ? "revoke_event_adjustment" : "cancel_calendar_event",{p_id:id}),"Unable to update event calendar");
+        await refreshEventCalendar();
+      },
+    });
+  }
+
+  async function loadClimateContext(dataClient = client) {
+    if (demoStore) return { demo: true, locations: [], evidence: [], adjustments: [], status: [] };
+    const tables = ["forecast_locations", "forecast_climate_evidence", "forecast_adjustments", "forecast_monitor_status"];
+    const results = await Promise.all(tables.map(table => fetchAllFrom(dataClient, table, "*", [[table === "forecast_monitor_status" ? "checked_at" : table === "forecast_locations" ? "branch_id" : "id", true]])));
+    const failed = results.find(result => result.error);
+    if (failed) {
+      console.error("Climate review data unavailable", failed.error);
+      return { error: `External monitoring unavailable: ${failed.error.message}. Apply the climate-review database setup and reload.`, locations: [], evidence: [], adjustments: [], status: [] };
+    }
+    return { locations: results[0].data, evidence: results[1].data, adjustments: results[2].data, status: results[3].data };
+  }
+
+  function activeClimateAdjustments(today, month) {
+    const context = liveData.climate;
+    if (!context || context.error || context.demo) return [];
+    const status = context.status[0];
+    if (!status || status.error || !Number.isFinite(Date.parse(status.checked_at))
+      || Date.now() - Date.parse(status.checked_at) > 48 * 3600000 || Date.parse(status.checked_at) > Date.now() + 60000) return [];
+    const evidence = new Set(context.evidence.filter(row => row.issued_on <= today && row.valid_until >= today).map(row => row.id));
+    const locations = new Map(context.locations.map(row => [row.branch_id, row]));
+    return context.adjustments.filter(row => !row.revoked_at && row.approved_by && row.month.slice(0, 7) === month
+      && row.approved_at <= new Date().toISOString() && evidence.has(row.evidence_id)
+      && locations.has(row.branch_id) && locations.get(row.branch_id).verified_at <= row.approved_at);
+  }
+
+  function climateReviewPanel(ids) {
+    const context = liveData.climate;
+    if (!context) return "";
+    if (context.error) return panel("External demand monitoring", "", `<p class="connected-error" role="alert">${escapeHTML(context.error)} Baseline forecasts are unchanged; external adjustments are not applied.</p>`);
+    if (context.demo) return panel("External demand monitoring", "Live official-source monitoring is not simulated in this demo.", "<p>Connect a real account to configure verified branch locations and review climate evidence. Demo forecasts have no external adjustment.</p>");
+    const today = localISODate();
+    const month = ui.inventoryForecastMonth || today.slice(0, 7);
+    const status = context.status[0];
+    const fresh = status && !status.error && Date.now() - Date.parse(status.checked_at) <= 48 * 3600000;
+    const evidence = context.evidence.filter(row => row.issued_on <= today && row.valid_until >= today).sort((a,b) => b.issued_on.localeCompare(a.issued_on))[0];
+    const branches = liveData.branches.filter(row => !ids || ids.has(row.id));
+    const canReview = currentProfile.role !== "ps";
+    const active = new Set(activeClimateAdjustments(today, month).map(row => row.id));
+    const locations = branches.map(branch => {
+      const location = context.locations.find(row => row.branch_id === branch.id);
+      return `<li>${escapeHTML(branch.name)}: ${location ? `${escapeHTML(location.city)}, ${escapeHTML(location.province)} (${escapeHTML(location.latitude)}, ${escapeHTML(location.longitude)})` : "Location not verified; external adjustments disabled."}</li>`;
+    }).join("");
+    const reviews = context.adjustments.filter(row => branches.some(b => b.id === row.branch_id) && row.month.slice(0,7) === month).map(row =>
+      `<li>${escapeHTML(branchName(row.branch_id))} / ${escapeHTML(row.category)} / ${escapeHTML(row.month.slice(0,7))}: ${escapeHTML(row.percent)}% — ${escapeHTML(row.reason)}. ${row.revoked_at ? "Revoked/superseded" : active.has(row.id) ? "Applied" : "Not applied (stale evidence, monitor or location changed)"}. Approved ${escapeHTML(row.approved_at.slice(0,10))}${canReview && !row.revoked_at ? ` <button type="button" class="button button-outline button-small" data-climate-revoke="${escapeHTML(row.id)}">Revoke</button>` : ""}</li>`).join("");
+    return panel("External demand monitoring", "Official ENSO context only—not a local temperature forecast or a proven sales uplift. No percentage is generated automatically.",
+      `<p ${!fresh ? 'class="connected-error" role="alert"' : ""}>${status ? `Last source check: ${escapeHTML(status.checked_at)}. ${status.error ? escapeHTML(status.error) : fresh ? "Successful." : "Stale (over 48 hours); external adjustments disabled."}` : "No official-source check has run; external adjustments disabled."}</p>
+      <p>Local weather forecast: unavailable. Only verified official public sources are allowed; no paid or non-commercial weather endpoint is used.</p>
+      ${evidence ? `<p><a href="${escapeHTML(evidence.source_url)}" target="_blank" rel="noopener noreferrer">NOAA official ENSO bulletin</a> · issued ${escapeHTML(evidence.issued_on)} · ${escapeHTML(evidence.phase)} · review freshness limit ${escapeHTML(evidence.valid_until)}. Evidence requires human review; effects on your branch are not guaranteed.</p>` : "<p>No fresh verified official advisory is available.</p>"}
+      <details><summary>Verified branch locations</summary><ul>${locations || "<li>No accessible branches.</li>"}</ul></details>
+      ${reviews ? `<details open><summary>Adjustment decisions for ${escapeHTML(month)}</summary><ul>${reviews}</ul></details>` : "<p>No approved external adjustments for this forecast month.</p>"}
+      <div class="filter-actions">${currentProfile.role === "admin" ? '<button class="button button-outline" type="button" data-open="climate-location">Verify branch location</button><button class="button button-outline" type="button" data-open="climate-check">Check official source now</button>' : ""}
+      ${canReview && fresh && evidence ? '<button class="button button-primary" type="button" data-open="climate-review">Review evidence / enter adjustment</button>' : ""}</div>`);
+  }
+
+  async function refreshClimateContext() {
+    const context = await loadClimateContext();
+    if (context.error) throw new Error(context.error);
+    liveData.climate = context;
+    refreshResults();
+  }
+
+  function openClimateLocation() {
+    if (currentProfile.role !== "admin" || demoStore) return;
+    openModal({ title: "Verify branch location", intro: "Use a checked city/province and map coordinates. Saving a location revokes existing branch adjustments so they must be reviewed again.",
+      body: `<label class="field"><span>Branch</span>${selectHTML("branch", liveData.branches.map(row=>[row.id,row.name]), "", "required")}</label>
+      <label class="field"><span>City</span><input name="city" required></label><label class="field"><span>Province</span><input name="province" required></label>
+      <label class="field"><span>Latitude</span><input name="latitude" type="number" step="any" min="-90" max="90" required></label>
+      <label class="field"><span>Longitude</span><input name="longitude" type="number" step="any" min="-180" max="180" required></label>
+      <label><input name="verified" type="checkbox" required> I checked this branch location against a reliable map.</label>`,
+      onSubmit: async form => {
+        checkResult(await client.rpc("save_forecast_location", { p_branch: form.elements.branch.value, p_city: form.elements.city.value, p_province: form.elements.province.value,
+          p_latitude: Number(form.elements.latitude.value), p_longitude: Number(form.elements.longitude.value) }), "Unable to save verified location");
+        await refreshClimateContext();
+      },
+      onReady: form => {
+        const fill = () => {
+          const row = liveData.climate.locations.find(item=>item.branch_id===form.elements.branch.value);
+          for (const key of ["city","province","latitude","longitude"]) form.elements[key].value = row?.[key] ?? "";
+          form.elements.verified.checked = false;
+        };
+        form.elements.branch.addEventListener("change", fill); fill();
+      },
+    });
+  }
+
+  function openClimateReview() {
+    if (currentProfile.role === "ps" || demoStore) return;
+    const today = localISODate(), context = liveData.climate;
+    const evidence = context.evidence.filter(row=>row.issued_on<=today && row.valid_until>=today).sort((a,b)=>b.issued_on.localeCompare(a.issued_on))[0];
+    if (!evidence) return alert("No fresh official climate evidence is available.");
+    const branches = liveData.branches.filter(row=>context.locations.some(item=>item.branch_id===row.id));
+    if (!branches.length) return alert("An administrator must verify a branch location first.");
+    const categories = [...new Set((liveData.inventoryCatalog || []).map(row=>String(row.category || "").trim()).filter(Boolean))].sort(natural);
+    openModal({ title: "Approve evidence-backed demand adjustment", submitLabel: "Approve adjustment",
+      intro: `NOAA ${evidence.phase}, issued ${evidence.issued_on}. This is not a local weather forecast or a measured sales effect. Enter your own justified percentage; nothing is prefilled. It replaces any existing adjustment for this branch/category/month and applies only while the monitor and evidence remain fresh.`,
+      body: `<label class="field"><span>Branch</span>${selectHTML("branch", branches.map(row=>[row.id,row.name]), "", "required")}</label>
+      <label class="field"><span>Category</span>${selectHTML("category", [["","Choose category"],...categories.map(value=>[value,value])], "", "required")}</label>
+      <label class="field"><span>Forecast month</span><input name="month" type="month" value="${escapeHTML(ui.inventoryForecastMonth || today.slice(0,7))}" required></label>
+      <label class="field"><span>Adjustment % (negative reduces demand)</span><input name="percent" type="number" step="any" min="-100" required></label>
+      <label class="field"><span>Local evidence, expected effect and justification for this number</span><textarea name="reason" minlength="15" required></textarea></label>
+      <label><input type="checkbox" required> I reviewed the source and accept responsibility for this estimate.</label>`,
+      onSubmit: async form => {
+        checkResult(await client.rpc("approve_forecast_adjustment", { p_branch: form.elements.branch.value, p_evidence: evidence.id,
+          p_category: form.elements.category.value, p_month: form.elements.month.value + "-01", p_percent: Number(form.elements.percent.value), p_reason: form.elements.reason.value }), "Unable to approve demand adjustment");
+        await refreshClimateContext();
+      },
+    });
+  }
+
+  function openClimateCheck() {
+    if (currentProfile.role !== "admin" || demoStore) return;
+    openModal({ title: "Check official climate source", submitLabel: "Check source", intro: "Fetch the latest official NOAA ENSO bulletin. No sales, staff, customer or branch-location data is sent to NOAA. This does not approve any demand adjustment.", body: "<p>Local temperature forecasts remain unavailable until a verified official integration is supported.</p>",
+      onSubmit: async () => {
+        const result = await client.functions.invoke("forecast-climate", { body: {} });
+        if (result.error) throw new Error(`Official-source check failed: ${result.error.message}. Verify the forecast-climate service deployment and reload monitoring status.`);
+        if (result.data?.error) throw new Error(result.data.error);
+        await refreshClimateContext();
+      },
+    });
+  }
+
+  function openClimateRevoke(id) {
+    if (currentProfile.role === "ps" || demoStore) return;
+    openModal({ title: "Revoke external adjustment", intro: "The baseline seasonal forecast will remain. This approval stays in the audit history.", body: "<p>Revoke this adjustment for its branch, category and month?</p>", submitLabel: "Revoke",
+      onSubmit: async () => {
+        checkResult(await client.rpc("revoke_forecast_adjustment", { p_id: id }), "Unable to revoke adjustment");
+        await refreshClimateContext();
+      },
+    });
+  }
+
+  function renderDemoControls() {
+    let bar = document.querySelector("#demo-workspace-controls");
+    if (!demoStore) {
+      bar?.remove();
+      return;
+    }
+    if (!bar) {
+      bar = document.createElement("section");
+      bar.id = "demo-workspace-controls";
+      bar.className = "demo-workspace-controls";
+      bar.setAttribute("aria-label", "Demo workspace controls");
+      document.querySelector(".connected-main").prepend(bar);
+    }
+    bar.innerHTML = `<div><strong>DEMO · local data only</strong><p>${escapeHTML(demoStore.catalogLabel)}. Starts with fictional sales, customers and accounts. Edits stay in this browser; no live data is changed.</p></div>
+      <label class="field"><span>Preview role</span><select id="demo-role">${Object.entries(roleLabels).map(([role, label]) =>
+        `<option value="${role}" ${currentProfile.role === role ? "selected" : ""}>${escapeHTML(label)}</option>`).join("")}</select></label>
+      <div class="demo-scenario" role="group" aria-label="Demo sales performance">
+        <span>Sales performance</span><div>${[["behind", "Behind Pace"], ["on", "On Track"]].map(([value, label]) =>
+          `<button type="button" class="button button-outline button-small" data-demo-scenario="${value}" aria-pressed="${demoStore.scenario === value}">${label}</button>`).join("")}</div>
+        <small>Recalculates fictional sales for MTD branch/district pace. Philippine date: ${escapeHTML(localISODate())}. ${localISODate().endsWith("-01") ? "Pace begins after the first completed day." : ""}</small>
+      </div>
+      <button class="button button-outline button-small" type="button" id="demo-reset">Reset demo</button>
+      <button class="button button-outline button-small" type="button" id="demo-exit">Exit demo</button>`;
+    bar.querySelector("#demo-role").addEventListener("change", async event => {
+      try {
+        if (workspaceWrites) throw new Error("Wait for the current save to finish before switching roles.");
+        demoStore.setRole(event.target.value);
+        closeModal();
+        resetUi();
+        activePage = "overview";
+        await loadLiveWorkspace(demoStore.session);
+      } catch (error) {
+        alert(error.message);
+        event.target.value = currentProfile.role;
+      }
+    });
+    bar.querySelectorAll("[data-demo-scenario]").forEach(button => button.addEventListener("click", async () => {
+      if (workspaceWrites) return alert("Wait for the current save to finish before changing the demo scenario.");
+      if (demoStore.scenario === button.dataset.demoScenario) return;
+      try {
+        closeModal();
+        demoStore.setScenario(button.dataset.demoScenario);
+        ui.period = "month";
+        ui.month = currentMonth();
+        ui.anBasis = "all";
+        await loadLiveWorkspace(demoStore.session);
+      } catch (error) { alert(error.message); }
+    }));
+    bar.querySelector("#demo-reset").addEventListener("click", async () => {
+      if (workspaceWrites) return alert("Wait for the current save to finish before resetting the demo.");
+      if (!confirm("Reset only the sample workspace and discard demo edits on this device? Real data is not changed.")) return;
+      try {
+        demoStore.reset();
+        await startDemo();
+      } catch (error) { alert(error.message); }
+    });
+    bar.querySelector("#demo-exit").addEventListener("click", exitDemo);
+    document.querySelector("#change-password").hidden = true;
+    document.querySelector("#push-toggle").hidden = true;
+    connectedSidebar.querySelector(".workspace-label").textContent = "DEMO WORKSPACE";
+    connectedNav.setAttribute("aria-label", "Demo workspace navigation");
+    document.querySelector("#sign-out").textContent = "Exit demo";
+    document.querySelector(".connected-topbar > span").textContent = "BRANCHLINE · DEMO DATA";
+  }
+
+  async function startDemo() {
+    if (workspaceWrites) return alert("Wait for the current save to finish before entering demo mode.");
+    try {
+      const catalog = window.BranchlineDemo.sampleCatalog();
+      const catalogLabel = "Illustrative products only · no sign-in needed · Philippine calendar";
+      const catalogStamp = "illustrative-v4";
+      demoStore = window.BranchlineDemo.create({ storage: localStorage, catalog, catalogLabel, catalogStamp });
+      client = demoStore.client;
+      closeModal();
+      resetUi();
+      activePage = "overview";
+      await loadLiveWorkspace(demoStore.session);
+    } catch (error) {
+      console.error("Unable to open demo workspace.", error);
+      exitDemo();
+      setAuthMessage(`${error.message} If the local demo is damaged, use Reset saved demo.`, true);
+      document.querySelector("#reset-saved-demo").hidden = false;
+    }
+  }
+
+  function exitDemo(force = false) {
+    if (force !== true && workspaceWrites) return alert("Wait for the current save to finish before leaving demo mode.");
+    closeModal();
+    demoStore = null;
+    client = liveClient;
+    document.querySelector("#demo-workspace-controls")?.remove();
+    document.querySelector("#change-password").hidden = false;
+    connectedSidebar.querySelector(".workspace-label").textContent = "LIVE WORKSPACE";
+    connectedNav.setAttribute("aria-label", "Live workspace navigation");
+    document.querySelector("#sign-out").textContent = "Sign out";
+    document.querySelector(".connected-topbar > span").innerHTML = 'BRANCHLINE <span class="live-indicator">● LIVE DATA</span>';
+    clearWorkspace();
+  }
+
+  // Summary totals cover empty 2025 branch/months and replace incomplete October 2026 sales.
+  function withHistoryFacts(facts, ids, isPs) {
+    const history = isPs ? [] : liveData.dailyHistory || [];
+    return history.length ? window.BranchlineDailyHistory.reconcileSalesFacts(history, facts, ids) : facts;
+  }
+
+  function withHistoryTransactions(facts, ids, isPs) {
+    return window.BranchlineDailyHistory.transactionFacts(isPs ? [] : liveData.dailyHistory || [], facts, ids);
+  }
+
+  function storeCountsFor(ids, isPs) {
+    if (isPs) return [];
+    const real = liveData.branchWalkins.filter(row => ids.has(row.branch_id));
+    const history = (liveData.dailyHistory || []).filter(row => ids.has(row.branch_id));
+    return history.length ? [...real, ...window.BranchlineDailyHistory.historyWalkins(history, real)] : real;
+  }
+
+  function analyticsFacts(ids) {
+    const sales = currentProfile.role === "ps" ? visibleSales() : liveData.sales;
+    const facts = [];
+    sales.forEach(sale => {
+      if (!ids.has(sale.branch_id)) return;
+      linesForSale(sale.id).forEach(line => {
+        facts.push({
+          date: sale.sold_on.slice(0, 10),
+          saleId: sale.id,
+          branchId: sale.branch_id,
+          psId: sale.ps_id,
+          psName: sale.ps_name || "",
+          brand: (line.brand || "").trim() || "Unbranded",
+          category: (line.category || "").trim(),
+          subCategory: (line.sub_category || "").trim(),
+          product: (line.model_description || "").trim() || "Unnamed product",
+          barcode: line.barcode,
+          quantity: Number(line.quantity),
+          amount: window.BranchlineAnalytics.salesLineAmount(line, ui.salesBasis),
+          srpAmount: line.srp != null && Number(line.srp) > 0 && Number(line.selling_price) > 0 ? Number(line.srp) * Number(line.quantity) : 0,
+          soldAmount: line.srp != null && Number(line.srp) > 0 && Number(line.selling_price) > 0 ? Number(line.selling_price) * Number(line.quantity) : 0,
+        });
+      });
+    });
+    return facts;
+  }
+
+  function dailySalesChart(rows, month, today, isPs = false) {
+    const desktop = window.matchMedia?.("(min-width: 901px)").matches;
+    const days = new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0).getDate();
+    const byDate = new Map(rows.map(row => [row.date, row]));
+    const width = 110 + days * 30;
+    const height = 300;
+    const top = 20;
+    const bottom = 258;
+    const min = Math.min(0, ...rows.map(row => row.total));
+    const max = Math.max(min === 0 ? 1 : 0, ...rows.map(row => row.total));
+    const range = max - min || 1;
+    const y = value => top + (max - value) / range * (bottom - top);
+    const zero = y(0);
+    const ticks = [...new Set([min, (max + min) / 2, max])].map(value => {
+      const position = y(value);
+      return `<line class="an-grid" x1="100" x2="${width - 10}" y1="${position}" y2="${position}"/><text class="an-axis" x="92" y="${position + 4}" text-anchor="end">${escapeHTML(formatMoney(value))}</text>`;
+    }).join("");
+    const bars = Array.from({ length: days }, (_, index) => {
+      const day = index + 1;
+      const date = `${month}-${String(day).padStart(2, "0")}`;
+      const row = byDate.get(date) || { total: 0, count: 0 };
+      const future = date > today;
+      const weekday = new Date(`${date}T00:00:00`).toLocaleDateString("en-PH", { weekday: "long" });
+      const label = `${date} · ${weekday}`;
+      const count = future ? "Not yet recorded" : `${row.count} sale${row.count === 1 ? "" : "s"}`;
+      const amount = future ? "Future day · not a forecast" : formatMoney(row.total);
+      const traffic = row.traffic;
+      const visitors = `${isPs ? "Clients assisted" : "Walk-ins"}: ${future || !traffic?.coveredDays ? "Not recorded" : traffic.visitors}`;
+      const conversion = `Conversion rate: ${future || traffic?.conversion == null ? "n/a" : `${(traffic.conversion * 100).toFixed(1)}%`}${!future && traffic?.partial ? " (counted branches only)" : ""}`;
+      const tip = `${label}|${count}|${amount}|${visitors}|${conversion}`;
+      const x = 100 + index * 30;
+      const valueY = y(row.total);
+      return `<g class="daily-day${future ? " daily-day-future" : ""}">
+        ${future ? "" : `<rect class="daily-bar${row.total < 0 ? " daily-bar-negative" : ""}" x="${x + 5}" y="${Math.min(zero, valueY)}" width="20" height="${Math.max(2, Math.abs(valueY - zero))}"/>`}
+        <rect class="daily-bar-hit" ${future ? "" : `data-daily-sales-date="${date}"`} x="${x}" y="${top}" width="30" height="${bottom - top + 30}" fill="transparent" tabindex="0" role="${desktop && !future ? "button" : "img"}" ${desktop && !future ? 'aria-haspopup="dialog"' : ""} aria-label="${escapeHTML(`${label}: ${count}, ${amount}, ${visitors}, ${conversion}${desktop && !future ? ". Open daily sales log" : ""}`)}" data-tip="${escapeHTML(tip)}"/>
+        <text class="an-axis daily-day-label" x="${x + 15}" y="${bottom + 22}" text-anchor="middle">${day}</text>
+      </g>`;
+    }).join("");
+    return `${chartExport(`Daily sales ${month}`, [["Date", "Day", "No. of sales", "Total sales"], ...rows.map(row => [row.date, new Date(`${row.date}T00:00:00`).toLocaleDateString("en-PH", { weekday: "long" }), row.count, row.total])])}<div class="daily-chart-scroll" role="region" aria-label="Daily sales chart; scroll horizontally to see every day" tabindex="0"><svg class="daily-sales-chart" viewBox="0 0 ${width} ${height}" style="min-width:${width}px" role="group" aria-label="Daily sales for ${escapeHTML(monthLabel(month))}; each bar is one day">
+      ${ticks}<line class="an-grid" x1="100" x2="${width - 10}" y1="${zero}" y2="${zero}"/>${bars}
+    </svg></div><p class="an-note">Daily actuals, not cumulative or forecast. On desktop, click a day to open its sales log, then choose a transaction for details. Hover a day, focus it with the keyboard, or long press on mobile for date, weekday, number of sales, total, ${isPs ? "clients assisted" : "walk-ins"} and conversion rate. Conversion uses transactions from branches with recorded traffic only; no count or zero traffic shows n/a. Scroll sideways to see all days. Future days are not recorded.</p>`;
+  }
+
+  function openDailySalesLog(date, fromTable = false) {
+    if ((!fromTable && !window.matchMedia("(min-width: 901px)").matches) || !/^\d{4}-\d{2}-\d{2}$/.test(date) || date > localISODate()) return;
+    const ids = panelIds("dsBranch", scopeBranchIds());
+    const rows = visibleSales().filter(sale => sale.sold_on === date && ids.has(sale.branch_id) && !isTestSale(sale, liveData.testPsIds))
+      .sort((a,b) => natural(a.invoice_number,b.invoice_number) || String(a.id).localeCompare(String(b.id)))
+      .map(sale => ({
+        sale, branch: branchName(sale.branch_id),
+        person: liveData.profiles.find(profile => profile.id === sale.ps_id)?.full_name || titleCase(sale.ps_name || "") || "Staff member",
+        total: saleTotal(sale),
+      }));
+    const total = rows.reduce((sum,row) => sum + row.total,0);
+    hidePieTip();
+    openModal({ title: `Daily sales log · ${date}`, readOnly: true, wide: true,
+      intro: `${rows.length} recorded transaction${rows.length === 1 ? "" : "s"} · ${formatMoney(total)} · ${ui.salesBasis === "srp" ? "SRP comparison" : "Selling price"} basis. Follows the daily chart's branch access; excludes TEST sales. Summary-only historical amounts may differ because they have no individual invoices.`,
+      body: `<p>Choose a transaction to view its products, quantities, serials and original prices.</p>
+        <div class="connected-table-wrap"><table class="connected-table"><thead><tr><th>Transaction / Invoice</th><th>Customer</th><th>Sale date</th><th>Product Specialist</th><th>Branch</th><th>Total</th></tr></thead>
+        <tbody>${rows.length ? rows.map(saleSummaryRowHTML).join("") : '<tr><td colspan="6">No individual sales transactions are recorded for this day within your access.</td></tr>'}</tbody></table></div>`,
+      onReady: form => {
+        form.closest(".dlg").classList.add("dlg-xwide");
+        const open = event => {
+          const row = event.target.closest("[data-sale-details]");
+          if (!row || (event.type === "keydown" && !["Enter"," "].includes(event.key))) return;
+          event.preventDefault();
+          try { openSaleDetails(row.dataset.saleDetails); }
+          catch (error) { console.error("Daily sales transaction could not open.",error); alert(friendlyError(error)); }
+        };
+        form.addEventListener("click",open);
+        form.addEventListener("keydown",open);
+      } });
+  }
+
+  function growthCell(value) {
+    if (value === null) return '<span class="an-muted">n/a</span>';
+    const sign = value > 0 ? "+" : "";
+    return `<span class="${value < 0 ? "an-down" : "an-up"}">${sign}${(value * 100).toFixed(1)}%</span>`;
+  }
+
+  // ---------- Payment mix ----------
+  function canSetPaymentTargets() {
+    return ["admin", "district_manager", "manager"].includes(currentProfile.role);
+  }
+
+  // Period filters for the analytics tables: MTD, YTD or a single day picked on a calendar.
+  function resolvePeriod(key, month, through) {
+    const A = window.BranchlineAnalytics;
+    const mode = ["mtd", "ytd", "day"].includes(ui[key]) ? ui[key] : "mtd";
+    const throughMonth = through.slice(0, 7);
+    const throughYear = through.slice(0, 4);
+    if (mode === "ytd") {
+      const picked = /^\d{4}$/.test(ui[`${key}Y`]) ? ui[`${key}Y`] : throughYear;
+      const year = Number(picked);
+      const custom = picked !== throughYear;
+      const to = custom ? `${year}-12-31` : through;
+      return { mode, custom, from: `${year}-01-01`, to, prevFrom: `${year - 1}-01-01`, prevTo: custom ? `${year - 1}-12-31` : A.sameDayPriorYear(through), name: "Year to date", note: "same period last year", label: custom ? `Full year ${year}` : `Year to date ${year}` };
+    }
+    if (mode === "day") {
+      const day = ui[`${key}Date`] || through;
+      return { mode, from: day, to: day, prevFrom: A.addDays(day, -1), prevTo: A.addDays(day, -1), name: "Day", note: "the previous day", label: new Date(`${day}T00:00:00`).toLocaleDateString("en-PH", { dateStyle: "long" }) };
+    }
+    const pickedYear = /^\d{4}$/.test(ui[`${key}Y`]) ? ui[`${key}Y`] : throughYear;
+    const pickedMonth = /^(0[1-9]|1[0-2])$/.test(ui[`${key}M`]) ? ui[`${key}M`] : throughMonth.slice(5, 7);
+    const ym = `${pickedYear}-${pickedMonth}`;
+    if (ym !== throughMonth) {
+      const before = A.shiftMonth(ym, -1);
+      return { mode, custom: true, from: A.monthStart(ym), to: A.monthEnd(ym), prevFrom: A.monthStart(before), prevTo: A.monthEnd(before), name: "Month", note: "the previous month", label: monthLabel(ym) };
+    }
+    return { mode, custom: false, from: A.monthStart(month), to: through, prevFrom: A.monthStart(A.shiftMonth(month, -1)), prevTo: A.sameDayPriorMonth(through), name: "Month to date", note: "the same days last month", label: `${monthLabel(month)} to date` };
+  }
+
+  function periodControl(key, through) {
+    const mode = ["mtd", "ytd", "day"].includes(ui[key]) ? ui[key] : "mtd";
+    const options = [["mtd", "Month to date"], ["ytd", "Year to date"], ["day", "Daily (calendar)"]];
+    const years = new Set([through.slice(0, 4), String(Number(through.slice(0, 4)) - 1)]);
+    [...liveData.sales.map(sale => sale.sold_on), ...liveData.targets.map(row => row.month), ...(liveData.dailyHistory || []).map(row => row.day)]
+      .forEach(date => date && years.add(String(date).slice(0, 4)));
+    const year = /^\d{4}$/.test(ui[`${key}Y`]) ? ui[`${key}Y`] : through.slice(0, 4);
+    const monthValue = /^(0[1-9]|1[0-2])$/.test(ui[`${key}M`]) ? ui[`${key}M`] : through.slice(5, 7);
+    const monthSelect = `<label class="field an-inline an-narrow"><span class="visually-hidden">Month</span><select data-filter="${key}M">${Array.from({ length: 12 }, (_, index) => {
+      const value = String(index + 1).padStart(2, "0");
+      return `<option value="${value}" ${value === monthValue ? "selected" : ""}>${new Date(2000, index, 1).toLocaleString("en-PH", { month: "long" })}</option>`;
+    }).join("")}</select></label>`;
+    const yearSelect = `<label class="field an-inline an-narrow"><span class="visually-hidden">Year</span><select data-filter="${key}Y">${[...years].filter(value => value >= "2000").sort().reverse().map(value =>
+      `<option value="${value}" ${value === year ? "selected" : ""}>${value}</option>`).join("")}</select></label>`;
+    return `<label class="field an-inline"><span class="visually-hidden">Period</span><select data-filter="${key}">${options.map(([value, text]) =>
+      `<option value="${value}" ${mode === value ? "selected" : ""}>${text}</option>`).join("")}</select></label>${mode === "day"
+      ? `<label class="field an-inline"><span class="visually-hidden">Date</span><input type="date" data-filter="${key}Date" value="${escapeHTML(ui[`${key}Date`] || through)}"></label>`
+      : mode === "ytd" ? yearSelect : `${monthSelect}${yearSelect}`}`;
+  }
+
+  // Branch target for a period: whole-month targets for every month it touches; a single day gets its share of the month.
+  function periodTarget(branchId, period) {
+    const A = window.BranchlineAnalytics;
+    const fromMonth = period.from.slice(0, 7);
+    const toMonth = period.to.slice(0, 7);
+    const total = liveData.targets
+      .filter(row => row.branch_id === branchId && row.month.slice(0, 7) >= fromMonth && row.month.slice(0, 7) <= toMonth)
+      .reduce((sum, row) => sum + Number(row.amount), 0);
+    return period.mode === "day" ? total / Number(A.monthEnd(toMonth).slice(8, 10)) : total;
+  }
+
+  function computePaymentMix(month, ids, through, period) {
+    const A = window.BranchlineAnalytics;
+    const isPs = currentProfile.role === "ps";
+    const p = period || { mode: "mtd", from: A.monthStart(month), to: through || A.monthEnd(month) };
+    const all = isPs ? visibleSales() : liveData.sales;
+    const within = (from, to) => all
+      .filter(sale => ids.has(sale.branch_id) && sale.sold_on.slice(0, 10) >= from && sale.sold_on.slice(0, 10) <= to)
+      .map(sale => ({ mode: sale.payment_mode, amount: saleTotal(sale) }));
+    const modes = liveData.paymentModes.map(item => item.name);
+    const fromMonth = p.from.slice(0, 7);
+    const toMonth = p.to.slice(0, 7);
+    const scale = p.mode === "day" ? 1 / Number(A.monthEnd(toMonth).slice(8, 10)) : 1;
+    // Targets are keyed by branch and month so a year-to-date view sums each month's own target.
+    const branchTargets = new Map();
+    liveData.targets.filter(row => ids.has(row.branch_id) && row.month.slice(0, 7) >= fromMonth && row.month.slice(0, 7) <= toMonth)
+      .forEach(row => addTo(branchTargets, `${row.branch_id}|${row.month.slice(0, 7)}`, Number(row.amount) * scale));
+    // Targets are branch-level, so a PS only sees their own mix without a target comparison.
+    const targets = isPs ? [] : liveData.paymentTargets
+      .filter(row => ids.has(row.branch_id) && row.month.slice(0, 7) >= fromMonth && row.month.slice(0, 7) <= toMonth)
+      .map(row => ({ ...row, branch_id: `${row.branch_id}|${row.month.slice(0, 7)}`, amount: row.amount === null ? null : row.amount * scale }));
+    const mix = A.paymentMix({ sales: within(p.from, p.to), modes, targets, branchTargets });
+    const lyFrom = A.sameDayPriorYear(p.from), lyTo = A.sameDayPriorYear(p.to);
+    const databaseMonths = new Set(all.filter(sale => ids.has(sale.branch_id)).map(sale => `${sale.branch_id}|${sale.sold_on.slice(0, 7)}`));
+    const history = isPs ? [] : (liveData.dailyHistory || []).filter(row => ids.has(row.branch_id) &&
+      row.day.startsWith("2025-") && row.day >= lyFrom && row.day <= lyTo && !databaseMonths.has(`${row.branch_id}|${row.day.slice(0, 7)}`));
+    const summaryPayments = history.flatMap(row => Object.entries(row.payment_breakdown || {}).filter(([, amount]) => Number(amount) > 0).map(([mode, amount]) => ({ mode, amount })));
+    const lastYear = A.paymentMix({ sales: [...within(lyFrom, lyTo), ...summaryPayments], modes });
+    mix.missingPaymentDays = history.filter(row => Number(row.sales) > 0 && !row.payment_breakdown).length;
+    for (const row of lastYear.rows) {
+      if (!mix.rows.some(item => item.mode === row.mode)) mix.rows.push({
+        mode: row.mode, sales: 0, transactions: 0, share: mix.total > 0 ? 0 : null,
+        targetPct: null, targetAmount: null, achievement: null, status: "none",
+      });
+    }
+    mix.rows.forEach(row => {
+      const match = lastYear.rows.find(item => item.mode === row.mode);
+      row.lySales = match ? match.sales : 0;
+      row.lyShare = match ? match.share : null;
+    });
+    mix.lyTotal = lastYear.total;
+    mix.range = { from: p.from, to: p.to, lyFrom: A.sameDayPriorYear(p.from), lyTo: A.sameDayPriorYear(p.to) };
+    return mix;
+  }
+
+  const MIX_STATUS = { above: "Above target", below: "Below target", on: "On target", none: "No target" };
+
+  function paymentMixPanels(month, mix, label, controls = "", display = "table") {
+    const hasTarget = mix.hasTargets;
+    const head = ["Payment mode", "Transactions", "Sales", "Actual mix", "Last year", "Last year mix", "Target mix", "Target (₱)", "Achievement", "Status"];
+    const pct = value => (value === null || value === undefined ? "n/a" : `${value.toFixed(1)}%`);
+    const rowHtml = row => `<tr><td><strong>${escapeHTML(row.mode)}</strong></td><td>${row.transactions}</td><td>${formatMoney(row.sales)}</td><td>${pct(row.share)}</td><td>${formatMoney(row.lySales || 0)}</td><td>${pct(row.lyShare)}</td><td>${row.targetPct === null ? "—" : row.targetPct.toFixed(1) + "%"}</td><td>${row.targetAmount === null ? "—" : formatMoney(row.targetAmount)}</td><td>${row.achievement === null ? "—" : (row.achievement * 100).toFixed(1) + "%"}</td><td><span class="${row.status === "none" ? "an-muted" : "mix-" + row.status}">${MIX_STATUS[row.status]}</span></td></tr>`;
+    const totalRow = `<tr class="total-row"><td><strong>Total</strong></td><td>${mix.totalTransactions}</td><td>${formatMoney(mix.total)}</td><td>${mix.total ? "100%" : "n/a"}</td><td>${formatMoney(mix.lyTotal || 0)}</td><td>${mix.lyTotal ? "100%" : "n/a"}</td><td colspan="4"></td></tr>`;
+    const table = mix.rows.length
+      ? sortableTable("mix", head, mix.rows, rowHtml, totalRow)
+      : '<div class="empty-state">No sales or targets for this period.</div>';
+    const exportButton = manualExport("mix-table", `Payment mix ${label}`, head, mix.rows, rowHtml);
+    const editButton = canSetPaymentTargets() ? `<button class="button button-primary button-small" type="button" data-open="payment-targets">Set mix targets</button>` : "";
+    const lyLabel = mix.range ? `Same period last year (${mix.range.lyFrom} to ${mix.range.lyTo})` : "Same period last year";
+    const pies = [
+      pieChart("Sales by payment mode", label, mix.rows.map(row => ({ label: row.mode, value: row.sales })), { tableKey: "mix" }),
+      pieChart("Sales by payment mode · last year", lyLabel, mix.rows.map(row => ({ label: row.mode, value: row.lySales || 0 })), { tableKey: "mix" }),
+    ];
+    if (hasTarget) {
+      const targetEntries = mix.rows.filter(row => row.targetPct !== null).map(row => ({ label: row.mode, value: row.targetPct }));
+      pies.push(pieChart("Target payment mix", `${label} · share of sales`, targetEntries, { amounts: false, tableKey: "mix" }));
+    }
+    const missing = mix.missingPaymentDays ? `<p class="an-note">Last-year payment breakdown is missing for ${mix.missingPaymentDays} imported day(s). Re-import the monitoring workbook to load its channels; saved totals are retained.</p>` : "";
+    if (display === "pies") return missing + `<div class="connected-charts">${pies.join("")}</div>`;
+    return panel("Payment mix: this year vs last year vs target", `${label}. Cash + COD are Store Operations; Debit Card is included in Credit Card. Original payment labels remain in transaction records. Last year uses database payments, or verified monitoring channels for empty 2025 branch/months. Status compares actual and target shares (±2 points counts as on target).`, missing + table, `<div class="mix-tools"><div class="mix-tools-left">${editButton}</div><div class="mix-tools-right">${controls}${exportButton}</div></div>`, "mix");
+  }
+
+  function overviewPaymentPanels(display) {
+    const A = window.BranchlineAnalytics;
+    const month = anchorMonth();
+    const through = month === currentMonth() ? localISODate() : A.monthEnd(month);
+    const period = ui.period === "day"
+      ? { mode: "day", from: periodDay(), to: periodDay() }
+      : { mode: ui.period === "year" ? "ytd" : "mtd", from: ui.period === "year" ? `${month.slice(0, 4)}-01-01` : A.monthStart(month), to: through };
+    const mix = computePaymentMix(month, scopeBranchIds(), through, period);
+    return paymentMixPanels(month, mix, statusLabel(), "", display);
+  }
+
+  function openPaymentTargetsModal() {
+    const branches = [...liveData.branches].sort((a, b) => natural(a.name, b.name));
+    const modes = liveData.paymentModes.map(item => item.name);
+    const startBranch = branches.find(branch => branch.id === ui.branch)?.id || branches[0]?.id;
+    const month = ui.month || currentMonth();
+    const rowsHtml = modes.map((name, index) => `<tr><td>${escapeHTML(name)}</td><td><input name="pct_${index}" type="number" min="0" max="100" step="0.01" placeholder="%"></td><td><input name="amt_${index}" type="number" min="0" step="0.01" placeholder="₱"></td></tr>`).join("");
+    openModal({
+      title: "Payment mix targets",
+      intro: "Set a share target (%), a peso target, or both for each payment mode. In comparisons, Cash + COD are combined as Store Operations and Debit + Credit Card as Credit Card, including their targets. Targets are per branch/month; a new month starts empty until set or copied.",
+      submitLabel: "Save targets",
+      wide: true,
+      body: `${fieldHTML("Branch", "branch", selectHTML("branch", [...(branches.length > 1 ? [["all", `All my branches (${branches.length})`]] : []), ...branches.map(branch => [branch.id, branch.name])], startBranch))}
+        ${fieldHTML("Month", "month", `<input name="month" type="month" value="${month}" required>`)}
+        <div class="connected-table-wrap"><table class="connected-table pm-table"><thead><tr><th>Payment mode</th><th>Share target (%)</th><th>Peso target (₱)</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>
+        <p class="an-note" id="pm-note"></p>
+        <button class="button button-outline button-small" type="button" id="pm-copy">Copy last month's targets</button>`,
+      onReady: form => {
+        const note = form.querySelector("#pm-note");
+        const fill = (monthValue, silent) => {
+          const branchId = form.elements.branch.value;
+          modes.forEach((name, index) => { form.elements[`pct_${index}`].value = ""; form.elements[`amt_${index}`].value = ""; });
+          if (branchId === "all") { if (!silent) note.textContent = "Applies to every listed branch. Blank rows are left unchanged."; return 0; }
+          const found = liveData.paymentTargets.filter(row => row.branch_id === branchId && row.month.slice(0, 7) === monthValue);
+          found.forEach(row => {
+            const index = modes.indexOf(row.mode);
+            if (index < 0) return;
+            form.elements[`pct_${index}`].value = row.share_pct ?? "";
+            form.elements[`amt_${index}`].value = row.amount ?? "";
+          });
+          if (!silent) note.textContent = found.length ? "" : "No targets set for this branch and month yet. Blank rows are cleared on save.";
+          return found.length;
+        };
+        const reload = () => fill(form.elements.month.value);
+        form.elements.branch.addEventListener("change", reload);
+        form.elements.month.addEventListener("change", reload);
+        form.querySelector("#pm-copy").addEventListener("click", () => {
+          const previousMonth = window.BranchlineAnalytics.shiftMonth(form.elements.month.value, -1);
+          const copied = fill(previousMonth, true);
+          note.textContent = copied ? `Copied ${copied} target(s) from ${monthLabel(previousMonth)}. Review and save.` : `No targets found for ${monthLabel(previousMonth)}.`;
+        });
+        reload();
+      },
+      onSubmit: async form => {
+        const read = name => {
+          const raw = form.elements[name].value.trim();
+          return raw === "" ? null : Number(raw);
+        };
+        const entries = modes.map((name, index) => ({ name, pct: read(`pct_${index}`), amt: read(`amt_${index}`) }));
+        entries.forEach(entry => {
+          if (entry.pct !== null && (!Number.isFinite(entry.pct) || entry.pct < 0 || entry.pct > 100)) throw new Error(`${entry.name}: the share must be between 0 and 100.`);
+          if (entry.amt !== null && (!Number.isFinite(entry.amt) || entry.amt < 0)) throw new Error(`${entry.name}: enter a valid peso amount.`);
+        });
+        const shareTotal = entries.reduce((sum, entry) => sum + (entry.pct || 0), 0);
+        if (shareTotal > 100.01) throw new Error(`The share targets add up to ${shareTotal.toFixed(2)}%. They must not exceed 100%.`);
+        const selected = form.elements.branch.value;
+        const ids = selected === "all" ? branches.map(branch => branch.id) : [selected];
+        const monthDate = `${form.elements.month.value}-01`;
+        const stamp = new Date().toISOString();
+        const upserts = [];
+        ids.forEach(id => entries.forEach(entry => {
+          if (entry.pct === null && entry.amt === null) return;
+          upserts.push({ dealer_id: currentProfile.dealer_id, branch_id: id, month: monthDate, mode: entry.name, share_pct: entry.pct, amount: entry.amt, created_by: currentProfile.id, updated_at: stamp });
+        }));
+        if (upserts.length) {
+          const saved = await client.from("payment_mode_targets").upsert(upserts, { onConflict: "branch_id,month,mode" });
+          if (saved.error) throw saved.error;
+        }
+        const blank = entries.filter(entry => entry.pct === null && entry.amt === null).map(entry => entry.name);
+        if (selected !== "all" && blank.length) {
+          const removed = await client.from("payment_mode_targets").delete().eq("branch_id", selected).eq("month", monthDate).in("mode", blank);
+          if (removed.error) throw removed.error;
+        }
+        await refreshData();
+      },
+    });
+  }
+
+  // ---------- Traffic, transactions and conversion comparison ----------
+  function trafficStats(A, ctx, from, to) {
+    const inRange = ctx.sales.filter(sale => sale.date >= from && sale.date <= to);
+    const total = inRange.reduce((sum, sale) => sum + sale.amount, 0);
+    const transactions = ctx.transactions.filter(sale => sale.date >= from && sale.date <= to);
+    const walk = A.walkInSummary({ from, to, storeCounts: ctx.storeCounts, psCounts: ctx.psCounts, transactions });
+    return { sales: total, transactions: transactions.length, avgTicket: A.average(total, transactions.length), visitors: walk.visitors, covered: walk.coveredDays, conversion: walk.conversion, matched: walk.transactions };
+  }
+
+  function trafficContext(facts, ids, isPs) {
+    const bySale = new Map();
+    withHistoryFacts(facts, ids, isPs).forEach(fact => {
+      const entry = bySale.get(fact.saleId) || { id: fact.saleId, branchId: fact.branchId, date: fact.date, amount: 0 };
+      entry.amount += fact.amount;
+      bySale.set(fact.saleId, entry);
+    });
+    return {
+      sales: [...bySale.values()],
+      transactions: withHistoryTransactions(facts, ids, isPs),
+      storeCounts: storeCountsFor(ids, isPs),
+      psCounts: liveData.psWalkins.filter(row => ids.has(row.branch_id) && (!isPs || row.ps_id === currentProfile.id)),
+    };
+  }
+
+  function trafficPanels(A, ctx, month, through, yearCtx = ctx, yearBranchControl = "") {
+    const monthStart = A.monthStart(month);
+    const weekFrom = A.weekStart(through);
+    const yearStart = `${month.slice(0, 4)}-01-01`;
+    const periods = [
+      ["Day", through, through, A.addDays(through, -1), A.addDays(through, -1), "vs previous day"],
+      ["Week to date", weekFrom, through, A.addDays(weekFrom, -7), A.addDays(through, -7), "vs same days last week"],
+      ["Month to date", monthStart, through, A.monthStart(A.shiftMonth(month, -1)), A.sameDayPriorMonth(through), "vs same days last month"],
+      ["Year to date", yearStart, through, `${Number(month.slice(0, 4)) - 1}-01-01`, A.sameDayPriorYear(through), "vs same period last year"],
+    ].map(([name, from, to, pFrom, pTo, note]) => ({ name, note, cur: trafficStats(A, ctx, from, to), prev: trafficStats(A, ctx, pFrom, pTo) }));
+    const rate = value => (value === null || value === undefined ? "n/a" : `${(value * 100).toFixed(1)}%`);
+    const points = (cur, prev) => {
+      if (cur === null || prev === null) return '<span class="an-muted">n/a</span>';
+      const diff = (cur - prev) * 100;
+      return `<span class="${diff < 0 ? "an-down" : "an-up"}">${diff > 0 ? "+" : ""}${diff.toFixed(1)} pts</span>`;
+    };
+    const perDay = (stat, key) => (stat.covered > 0 ? stat[key] / stat.covered : null);
+    const rows = [];
+    periods.forEach(p => {
+      rows.push(["Sales", p, formatMoney(p.cur.sales), formatMoney(p.prev.sales), growthCell(A.growth(p.cur.sales, p.prev.sales))]);
+      rows.push(["Transactions", p, String(p.cur.transactions), String(p.prev.transactions), growthCell(A.growth(p.cur.transactions, p.prev.transactions))]);
+      rows.push(["Average sale", p, p.cur.avgTicket === null ? "n/a" : formatMoney(p.cur.avgTicket), p.prev.avgTicket === null ? "n/a" : formatMoney(p.prev.avgTicket), growthCell(A.growth(p.cur.avgTicket, p.prev.avgTicket))]);
+      rows.push(["Walk-ins", p, p.cur.covered ? `${p.cur.visitors} (${p.cur.covered} day${p.cur.covered === 1 ? "" : "s"})` : "No data", p.prev.covered ? `${p.prev.visitors} (${p.prev.covered} day${p.prev.covered === 1 ? "" : "s"})` : "No data", growthCell(A.growth(perDay(p.cur, "visitors"), perDay(p.prev, "visitors")))]);
+      rows.push(["Conversion", p, rate(p.cur.conversion), rate(p.prev.conversion), points(p.cur.conversion, p.prev.conversion)]);
+    });
+    const order = ["Sales", "Transactions", "Average sale", "Walk-ins", "Conversion"];
+    rows.sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]));
+    const head = ["Metric", "Period", "Current", "Prior", "Change"];
+    const rowHtml = ([metric, p, current, prior, change]) => `<tr><td><strong>${escapeHTML(metric)}</strong></td><td data-filter-value="${escapeHTML(p.name)}">${escapeHTML(p.name)}<br><small class="an-muted">${escapeHTML(p.note)}</small></td><td>${current}</td><td>${prior}</td><td>${change}</td></tr>`;
+    const download = manualExport("traffic-compare", "Traffic comparison", head, rows, rowHtml);
+    const compare = panel("Transactions, walk-ins and conversion: day, week, month, year", "Walk-in change is per counted day so days without a count never distort it. Conversion only uses counted days. Use the column headers to sort or filter.", sortableTable("traffic-compare", head, rows, rowHtml), download);
+
+    const years = new Set([Number(month.slice(0, 4))]);
+    ctx.sales.forEach(sale => years.add(Number(sale.date.slice(0, 4))));
+    ctx.transactions.forEach(sale => years.add(Number(sale.date.slice(0, 4))));
+    ctx.storeCounts.forEach(row => years.add(Number(String(row.counted_on).slice(0, 4))));
+    const yearList = [...years].filter(value => value >= 2000).sort((a, b) => b - a);
+    const year = yearList.includes(Number(ui.yrYear)) ? Number(ui.yrYear) : Number(month.slice(0, 4));
+    const throughYear = Number(through.slice(0, 4));
+    const trendRows = [];
+    if (year <= throughYear) {
+      for (let m = 1; m <= 12; m += 1) {
+        const ym = `${year}-${String(m).padStart(2, "0")}`;
+        if (year === throughYear && ym > through.slice(0, 7)) break;
+        const lyYm = `${year - 1}-${String(m).padStart(2, "0")}`;
+        const partial = year === throughYear && ym === through.slice(0, 7);
+        trendRows.push({
+          month: ym,
+          stat: trafficStats(A, yearCtx, A.monthStart(ym), partial ? through : A.monthEnd(ym)),
+          ly: trafficStats(A, yearCtx, A.monthStart(lyYm), partial ? A.sameDayPriorYear(through) : A.monthEnd(lyYm)),
+        });
+      }
+    }
+    const yearTotal = trendRows.length ? {
+      stat: trafficStats(A, yearCtx, `${year}-01-01`, year === throughYear ? through : `${year}-12-31`),
+      ly: trafficStats(A, yearCtx, `${year - 1}-01-01`, year === throughYear ? A.sameDayPriorYear(through) : `${year - 1}-12-31`),
+    } : null;
+    const trendHead = ["Month", "Sales", "Last year sales", "Sales change", "Transactions", "Last year transactions", "Average sale", "Last year average", "Walk-ins", "Last year walk-ins", "Conversion", "Last year conversion"];
+    const money = value => (value === null ? "n/a" : formatMoney(value));
+    const visitors = stat => (stat.covered ? stat.visitors : "—");
+    const trendCells = (stat, ly) => `<td>${formatMoney(stat.sales)}</td><td>${formatMoney(ly.sales)}</td><td>${growthCell(A.growth(stat.sales, ly.sales))}</td><td>${stat.transactions}</td><td>${ly.transactions}</td><td>${money(stat.avgTicket)}</td><td>${money(ly.avgTicket)}</td><td>${visitors(stat)}</td><td>${visitors(ly)}</td><td>${rate(stat.conversion)}</td><td>${rate(ly.conversion)}</td>`;
+    const trendRowHtml = row => `<tr><td>${escapeHTML(monthLabel(row.month))}</td>${trendCells(row.stat, row.ly)}</tr>`;
+    const trendTable = trendRows.length
+      ? `<div class="connected-table-wrap"><table class="connected-table"><thead><tr>${trendHead.map(item => `<th>${item}</th>`).join("")}</tr></thead><tbody>${trendRows.map(trendRowHtml).join("")}<tr class="total-row"><td><strong>${year === throughYear ? "Year to date" : "Full year"}</strong></td>${trendCells(yearTotal.stat, yearTotal.ly)}</tr></tbody></table></div>`
+      : '<div class="empty-state">No data for this year yet.</div>';
+    const yearSelect = `<label class="field an-inline"><span class="visually-hidden">Year</span><select data-filter="yrYear">${yearList.map(value =>
+      `<option value="${value}" ${value === year ? "selected" : ""}>${value}</option>`).join("")}</select></label>`;
+    const trend = panel(`Yearly comparison: ${year} vs ${year - 1}`, "Sales: Sales Database; 2025 branch/months with no database sales use Sales Summary totals. October 2026 uses the supplied Sales Summary instead of incomplete database sales. Sources are never added together. Transactions: Sales Summary per branch/month where available, otherwise recorded invoices. Walk-ins show only where counts exist.", trendTable, `${yearBranchControl}${yearSelect}${manualExport("traffic-monthly", `Yearly comparison ${year}`, trendHead, trendRows, trendRowHtml)}`);
+    return { compare, trend, periods };
+  }
+
+  // ---------- Diagnosis and action plan ----------
+  function insightsPanel(insights) {
+    if (!insights.length) return panel("Diagnosis and action plan", "", '<div class="empty-state">Nothing to flag right now. Add targets and daily walk-in counts for deeper analysis.</div>');
+    const LEVEL = { high: "High priority", medium: "Needs attention", low: "Watch", good: "Going well" };
+    const list = items => (items.length ? `<ul>${items.map(item => `<li>${escapeHTML(item)}</li>`).join("")}</ul>` : "");
+    const cards = insights.map(item => `<article class="insight insight-${item.level}">
+      <header><span class="insight-level">${LEVEL[item.level]}</span><span class="insight-area">${escapeHTML(item.area)}</span></header>
+      <h3>${escapeHTML(item.title)}</h3><p>${escapeHTML(item.finding)}</p>
+      ${item.causes.length ? `<h4>Possible causes</h4>${list(item.causes)}` : ""}
+      ${item.effects.length ? `<h4>Possible effects</h4>${list(item.effects)}` : ""}
+      ${item.plans.length ? `<h4>Action plan</h4>${list(item.plans)}` : ""}
+    </article>`).join("");
+    const head = ["Priority", "Area", "Finding", "Possible causes", "Possible effects", "Action plan"];
+    const rowHtml = item => `<tr><td>${escapeHTML(LEVEL[item.level])}</td><td>${escapeHTML(item.area)}</td><td>${escapeHTML(`${item.title}. ${item.finding}`)}</td><td>${escapeHTML(item.causes.join(" "))}</td><td>${escapeHTML(item.effects.join(" "))}</td><td>${escapeHTML(item.plans.join(" "))}</td></tr>`;
+    return panel("Diagnosis and action plan", "Generated from your numbers. Causes are likely explanations to check on the floor, not proven facts.", `<div class="insight-grid">${cards}</div>`, manualExport("insights", "Diagnosis and action plan", head, insights, rowHtml));
+  }
+
+  function dailySalesNeededCard({ target, actual, month, today, rules }) {
+    const A = window.BranchlineAnalytics;
+    const start = month < today.slice(0, 7) ? null : month === today.slice(0, 7) ? today : A.monthStart(month);
+    const days = start ? A.countSellingDays(start, A.monthEnd(month), rules) : 0;
+    const pace = A.requiredPace({ target, actual, paceDays: days });
+    const value = target <= 0 ? "No target" : pace.met ? formatMoney(0)
+      : pace.perDay === null ? "No selling days remain" : formatMoney(pace.perDay);
+    const note = target <= 0 ? "Set a monthly target to calculate the daily requirement."
+      : pace.met ? "Monthly target reached."
+        : days ? `${formatMoney(pace.gap)} remaining ÷ ${days} selling day${days === 1 ? "" : "s"}${start === today ? " (including today if a selling day)" : ""}. Follows the selected branches and selling calendar.`
+          : `${formatMoney(pace.gap)} short of the month's target.`;
+    return `<article class="connected-metric"><span>Daily sales needed</span><strong>${value}</strong><small>${escapeHTML(note)}</small></article>`;
+  }
+
+  function analyticsDataTable(key, title, detail, headers, rows, cellClass = () => "", controls = "", beforeTable = "", formatCell = value => value) {
+    const rowHtml = row => {
+      const brand = key === "an-all-brand" && row[0] !== "Unknown (daily summary)"
+        ? ` class="rank-row" data-brand-detail="${escapeHTML(row[0])}" data-brand-range="all" tabindex="0"` : "";
+      return `<tr${brand}>${row.map((value, index) => `<td class="${escapeHTML(cellClass(row, index))}">${escapeHTML(formatCell(value, index) ?? "Unknown")}</td>`).join("")}</tr>`;
+    };
+    const table = tableBlock(key, headers, rows, rowHtml, "No data in this scope.", PAGE_SIZE,
+      (row, index) => row[index]);
+    return panel(title, detail, beforeTable + (key === "an-inventory-products"
+      ? `<div class="inventory-product-table${ui.inventoryProductDetails ? "" : " inventory-product-basic"}">${table}</div>` : table), controls);
+  }
+
+  function inventoryAnalyticsPanels(ids, facts, from, to, today) {
+    if (liveData.inventoryError) return panel("Inventory analysis unavailable", "",
+      `<p class="connected-error" role="alert">${escapeHTML(liveData.inventoryError)}</p>`);
+    const isPs = currentProfile.role === "ps";
+    const I = window.BranchlineInventory;
+    const catalog = liveData.inventoryCatalog || [];
+    const matchesBrand = isPs ? I.brandMatcher(currentProfile, liveData.profiles, catalog) : () => true;
+    const scopedCatalog = catalog.filter(item => ids.has(item.branch_id) && matchesBrand(item));
+    const summary = window.BranchlineAnalytics.inventorySummary({
+      catalog: scopedCatalog, stock: liveData.inventoryStock || [], serials: liveData.inventorySerials || [],
+      facts, branchIds: ids, today, from, to,
+    });
+    const salesError = isPs ? liveData.brandSalesError || (!Array.isArray(liveData.brandSales)
+      ? "Branch-wide product demand is unavailable. Reload the workspace before using forecasts." : "") : "";
+    const demandError = liveData.calendar?.error || salesError;
+    const demandFacts = isPs ? (liveData.brandSales || []).map(row => ({
+      branchId: row.branch_id, barcode: row.barcode, date: row.sold_on, quantity: row.quantity, category: row.category, brand: row.brand,
+    })) : facts;
+    const forecast = window.BranchlineAnalytics.inventoryForecast({
+      products: summary.products, facts: demandFacts, branchIds: ids, today,
+      from: "0001-01-01", to: today, unavailable: Boolean(demandError),
+      annualUnavailable: Boolean(salesError),
+      targetMonth: ui.inventoryForecastMonth || today.slice(0, 7),
+      adjustments: activeClimateAdjustments(today, ui.inventoryForecastMonth || today.slice(0, 7)),
+      closures: calendarClosures(), holidays: companyHolidayDates(),
+      eventAdjustments: activeEventAdjustments(ui.inventoryForecastMonth || today.slice(0,7)),
+    });
+    const mohAlerts = new WeakSet();
+    const products = forecast.products.map(row => {
+      const cells = [branchName(row.branch_id), row.barcode, row.model_description,
+      row.brand, row.category || "Unclassified", row.sub_category || "", row.quantity ?? "Not initialized",
+      row.annualSold ?? "Unavailable", formatMoney(row.sales), row.days90,
+      row.quantity === null ? "Not initialized" : row.quantity === 0 ? row.sold > 0 ? "Sold in period; currently out of stock" : "Out of stock"
+        : row.sold === 0 ? "Stock available; no recorded sales in period" : "Stock available",
+      row.branchSold ?? "Unavailable", row.stockTarget ?? "Unavailable",
+      row.reorder ?? (row.quantity === null ? "Stock unknown" : "Unavailable"), row.stockAlert,
+      row.forecastMonth, row.seasonalFactor ?? "Unavailable", row.forecastBasis,
+      row.soldThisMonth ?? "Unavailable", row.remainingDemand ?? "Unavailable", row.historyFrom || "No recorded sales",
+      row.historyMonths, row.baselineForecast ?? "Unavailable", row.approvedPercent, row.adjustmentReason,
+      row.sellingDays,row.remainingSellingDays,row.calendarFactor,row.eventPercent,row.eventReason,row.movementStatus,row.movementReason,row.sold,
+      row.moh ?? 0, row.forecast ?? "Unavailable"];
+      if (row.mohBad) mohAlerts.add(cells);
+      return cells;
+    });
+    const stockCellClass = (row, index) => index === 33
+      ? mohAlerts.has(row) ? "inventory-stock-alert" : ""
+      : [6, 13, 14].includes(index)
+      ? row[14] === "Critical stock" ? `inventory-stock-alert${row[6] === 0 ? " inventory-stock-attention" : ""}`
+        : row[14] === "Low stock" ? "inventory-stock-low" : row[14] === "Moderate stock" ? "inventory-stock-moderate" : "" : "";
+    const demandWarning = demandError ? `<p class="connected-error" role="alert">Forecast unavailable: ${escapeHTML(demandError)}</p>` : "";
+    const forecastControls = `<label class="field"><span>Adjustment month</span><input type="month" data-filter="inventoryForecastMonth" value="${escapeHTML(forecast.targetMonth)}" required></label>`;
+    const search = String(ui.inventoryProductSearch || "").trim().toLowerCase();
+    const shownProducts = search ? products.filter(row=>row.slice(0,6).some(value=>String(value ?? "").toLowerCase().includes(search))) : products;
+    const productControls = `<div class="inventory-product-controls">
+      <label class="field"><span>Search products</span><input type="search" data-inventory-product-search value="${escapeHTML(ui.inventoryProductSearch || "")}" placeholder="Barcode, product / model, brand, category or branch" aria-label="Search inventory and product sales"></label>
+      <label class="inventory-product-details"><input type="checkbox" data-inventory-product-details ${ui.inventoryProductDetails ? "checked" : ""}> Show details</label>
+      </div>`;
+    const productTable = demandWarning + analyticsDataTable("an-inventory-products", "Inventory and product sales", "",
+      ["Branch", "Barcode", "Product", "Brand", "Category", "Sub-category", "Available now", "Annual sell-out (YTD)", "Sales", "90+ day serials", "Observation", "Branch units sold", "3-month stock target", "Re-order qty", "Stock status", "Adjustment month", "Seasonal factor", "Forecast basis", "Branch units sold in adjustment month", "Remaining monthly demand", "Annual learning from", "History months", "Baseline monthly forecast", "Approved external adjustment %", "Adjustment justification","Open days in adjustment month","Remaining open days","Calendar factor","Approved event adjustment %","Event adjustment justification","Movement status","Movement explanation",isPs ? "Your units sold (selected period)" : "Units sold (selected period)","Months-on-Hand (MOH)","Adjusted monthly forecast"], shownProducts, stockCellClass, forecastControls, productControls,
+      (value,index) => index === 33 && typeof value === "number" ? Number(value.toFixed(2)) : value);
+    const aging = analyticsDataTable("an-inventory-aging", "Current stock aging", "Available serialized units only. Missing/invalid receipt dates are unknown; nonserialized units have no receipt-age data.",
+      ["Age band", "Available serials"], [["Current (0-29 days)", summary.current], ["30 days (30-59)", summary.days30],
+        ["60 days (60-89)", summary.days60], ["90 days or more", summary.days90], ["Unknown receipt age", summary.unknown]]);
+    const known = new Set(scopedCatalog.map(row => `${row.branch_id}\0${row.barcode}`));
+    const within = date => {
+      const day = date ? localISODate(new Date(date)) : "";
+      return day >= from && day <= to;
+    };
+    const batches = new Map((liveData.inventoryTransferBatches || []).map(row => [row.id, row]));
+    const transferRows = (liveData.inventoryTransfers || []).filter(row =>
+      (ids.has(row.from_branch) || ids.has(row.to_branch)) && within(row.dispatched_at) &&
+      (!isPs || known.has(`${row.from_branch}\0${row.barcode}`) || known.has(`${row.to_branch}\0${row.barcode}`)));
+    const transferGroups = new Map();
+    for (const row of transferRows) {
+      const status = batches.get(row.batch_id)?.status || row.status;
+      if (!transferGroups.has(status)) transferGroups.set(status, { lines: 0, units: 0 });
+      const group = transferGroups.get(status); group.lines++; group.units += Number(row.quantity);
+    }
+    const transfers = analyticsDataTable("an-inventory-transfers", "Transfer activity", "Transfer lines submitted/dispatched in the selected period, grouped by their current status. Each line is counted once, even when both branches are selected. These are not additional available stock.",
+      ["Current status", "Product lines", "Units"], [...transferGroups].map(([status, group]) => [inventoryTransferStatus(status), group.lines, group.units]));
+    const events = (liveData.inventoryEvents || []).filter(row => ids.has(row.branch_id) && within(row.created_at) &&
+      (!isPs || known.has(`${row.branch_id}\0${row.barcode}`)));
+    const history = analyticsDataTable("an-inventory-history", "Inventory movement history", "Recorded events only; snapshot replacements are not purchases or additive receipts. A blank quantity is unknown, not zero.",
+      ["Date", "Branch", "Action", "Barcode", "Quantity change", "Note"],
+      [...events].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))).map(row =>
+        [row.created_at, branchName(row.branch_id), row.kind, row.barcode || "", row.quantity, inventoryEventNote(row)]));
+    const snapshots = isPs ? "" : analyticsDataTable("an-inventory-snapshots", "Inventory report history",
+      "Reports imported in the period. Quantities are replacement snapshot totals and must not be added together as receipts.",
+      ["Imported", "Report date", "Branch", "Products", "Snapshot units"],
+      (liveData.inventorySnapshots || []).filter(row => ids.has(row.branch_id) && within(row.imported_at))
+        .map(row => [row.imported_at, row.reported_at, branchName(row.branch_id), row.products, row.quantity]));
+    return `${productTable}${aging}${transfers}${history}${snapshots}`;
+  }
+
+  function inventoryMohData(ids, facts, today) {
+    const isPs = currentProfile.role === "ps", catalog = liveData.inventoryCatalog || [];
+    const matches = isPs ? window.BranchlineInventory.brandMatcher(currentProfile, liveData.profiles, catalog) : () => true;
+    const products = window.BranchlineAnalytics.inventorySummary({
+      catalog: catalog.filter(row => ids.has(row.branch_id) && matches(row)),
+      stock: liveData.inventoryStock || [], serials: [], facts: [], branchIds: ids, today, from: today, to: today,
+    }).products;
+    const salesError = isPs ? liveData.brandSalesError || (!Array.isArray(liveData.brandSales) ? "Branch-wide sales unavailable" : "") : "";
+    const demand = isPs ? (liveData.brandSales || []).map(row => ({
+      branchId: row.branch_id, barcode: row.barcode, date: row.sold_on, quantity: row.quantity, brand: row.brand,
+    })) : facts;
+    return { ...window.BranchlineAnalytics.inventoryMonthsOnHand({ products, facts: demand, branchIds: ids, today,
+      unavailable: Boolean(salesError) }), error: liveData.inventoryError || salesError };
+  }
+
+  function inventoryMohCard(ids, facts, today) {
+    const data = inventoryMohData(ids, facts, today), total = data.total;
+    tableStore["an-inventory-brand-moh"] = { title: "Brand MOH",
+      headers: ["Branch","Brand","Available units","Priced stock (SRP)","Completed sell-out (SRP)","Monthly sell-out (SRP)","3-month target (SRP)","MOH","Status","Stock units missing SRP","Sell-out units missing SRP","Unmatched sell-out units"],
+      items: data.brands.map(row => [branchName(row.branch_id),row.brand,row.stockUnits ?? 0,
+        row.stockValue ?? 0,row.selloutValue ?? 0,row.monthlySelloutValue ?? 0,
+        row.targetStockValue ?? 0,row.moh ?? "",row.mohStatus,
+        row.missingStockSrpUnits,row.missingSalesSrpUnits,row.unmatchedSalesUnits]) };
+    const estimatedMoh = !data.error && total.moh == null && !total.unknownStockProducts && total.monthlySelloutValue > 0
+      ? total.stockValue / total.monthlySelloutValue : null;
+    const value = estimatedMoh != null ? `${estimatedMoh.toFixed(2)} months (estimated)` : data.error || total.moh == null
+      ? (total.mohStatus === "No sell-out" && !data.error ? "No sell-out" : "Unavailable")
+      : `${total.moh.toFixed(2)} months`;
+    const reason = [total.missingStockSrpUnits ? `${total.missingStockSrpUnits} stock units need SRP` : "",
+      total.missingSalesSrpUnits ? `${total.missingSalesSrpUnits} sold units need SRP` : "",
+      total.unmatchedSalesUnits ? `${total.unmatchedSalesUnits} sold units unmatched` : ""].filter(Boolean).join(" · ") || total.mohStatus;
+    const context = [
+      total.stockUnits == null ? "Stock count incomplete" : `${total.stockUnits} available units`,
+      total.stockValue == null ? "" : `${formatMoney(total.stockValue)} priced stock`, reason,
+    ].filter(Boolean).join(" · ");
+    return `<button type="button" class="connected-metric inventory-moh-card" data-open="inventory-moh" aria-haspopup="dialog">
+      <span>Months-on-Hand (MOH)</span><strong${!data.error && total.mohBad ? ' class="an-down"' : ""}>${escapeHTML(value)}</strong>
+      <small>${escapeHTML(data.error || context)}</small>
+      <small>Target: 3 months · View brands</small></button>`;
+  }
+
+  function openInventoryMoh(data = null, brandIndex = null) {
+    if (!data) {
+      const ids = scopeBranchIds();
+      data = inventoryMohData(ids, analyticsFacts(ids), localISODate());
+    }
+    const brand = brandIndex === null ? null : data.brands[brandIndex];
+    if (brandIndex !== null && !brand) throw new Error("The selected MOH brand is no longer available.");
+    const rows = brand ? data.products.filter(row => row.branch_id === brand.branch_id &&
+      String(row.brand || "Unclassified").trim().toLowerCase() === String(brand.brand).trim().toLowerCase()) : data.brands;
+    const headers = brand
+      ? ["Barcode","Product","Available units","Priced stock (SRP)","Completed sell-out (SRP)","Monthly sell-out (SRP)","3-month target (SRP)","MOH","Status"]
+      : ["Branch","Brand","Available units","Priced stock (SRP)","Completed sell-out (SRP)","Monthly sell-out (SRP)","3-month target (SRP)","MOH","Status","Stock units missing SRP","Sell-out units missing SRP","Unmatched sell-out units"];
+    const values = row => [brand ? row.barcode : branchName(row.branch_id), brand ? row.model_description : row.brand,
+      (brand ? row.quantity : row.stockUnits) ?? 0, row.stockValue ?? 0, row.selloutValue ?? 0,
+      row.monthlySelloutValue ?? 0, row.targetStockValue ?? 0, row.moh ?? "—", row.mohStatus,
+      ...(!brand ? [row.missingStockSrpUnits,row.missingSalesSrpUnits,row.unmatchedSalesUnits] : [])];
+    const rowHtml = row => `<tr${brand ? "" : ` data-moh-brand="${data.brands.indexOf(row)}" tabindex="0" role="button" aria-label="${escapeHTML(`View ${row.brand} products in ${branchName(row.branch_id)}`)}"`}>${values(row).map((value,index) =>
+      `<td${row.mohBad && [7,8].includes(index) ? ' class="inventory-stock-alert"' : ""}>${escapeHTML(typeof value === "number" && index >= 3 && index <= 6 ? formatMoney(value) : index === 7 && typeof value === "number" ? value.toFixed(2) : value)}</td>`).join("")}</tr>`;
+    openModal({ title: brand ? `${brand.brand} products · ${branchName(brand.branch_id)}` : "Months-on-Hand · Brands",
+      wide: true, readOnly: true,
+      headerAction: exportButton("data-moh-export", `Export ${brand ? "products" : "brands"}`),
+      intro: `${data.from} to ${data.to} · ${data.months} completed months. Target: 3 months. MOH divides the SRP value of available stock by average monthly sell-out at SRP. A dash marks an unavailable ratio. See Status for the reason.`,
+      body: `${data.error ? `<p role="alert" class="connected-error">${escapeHTML(data.error)}</p>` : ""}
+        ${brand ? '<button type="button" class="button button-outline" data-moh-back>Back to brands</button>' : ""}
+        <label class="field"><span>${brand ? "Search products" : "Search brands"}</span><input type="search" data-moh-search></label>
+        <div class="connected-table-wrap inventory-moh-drill"><table class="connected-table"><thead><tr>${headers.map((label, col) => columnHeading(label, "", false, `data-moh-sort="${col}"`)).join("")}</tr></thead><tbody data-moh-rows>${rows.map(rowHtml).join("")}</tbody></table></div>
+        <p data-moh-empty${rows.length ? " hidden" : ""}>No data in this scope.</p>`,
+      onReady: form => {
+        let visible = rows, search = "", sort = null;
+        const download = form.closest(".dlg").querySelector("[data-moh-export]");
+        download.addEventListener("click", () => chooseExportFormat(download, format =>
+          exportWorkbook([{ name: brand ? "Products" : "Brands", rows: [headers,...visible.map(values)] }],
+            `branchline-moh-${localISODate()}`, false, format)));
+        const filters = {};
+        const display = (row, col) => {
+          const value = values(row)[col];
+          return typeof value === "number" && col >= 3 && col <= 6 ? formatMoney(value) :
+            col === 7 && typeof value === "number" ? value.toFixed(2) : value;
+        };
+        const renderRows = () => {
+          visible = rows.filter(row => values(row).slice(0,2).some(value=>String(value || "").toLowerCase().includes(search)));
+          visible = filterTableItems(visible, filters, rowHtml, display);
+          if (sort) visible = sortedItems(visible, rowHtml, sort, (row,col) => values(row)[col]);
+          form.querySelector("[data-moh-rows]").innerHTML = visible.map(rowHtml).join("");
+          form.querySelector("[data-moh-empty]").hidden = visible.length > 0;
+          form.querySelectorAll("[data-moh-sort]").forEach(button => {
+            const col = Number(button.dataset.mohSort);
+            const active = sort?.col === col ? sort.dir : "";
+            button.closest("th").setAttribute("aria-sort", active === "asc" ? "ascending" : active === "desc" ? "descending" : "none");
+            button.querySelector(".sort-arrow").textContent = active === "asc" ? "▲" : active === "desc" ? "▼" : "▾";
+            button.classList.toggle("customer-filter-indicator", Boolean(filters[col]));
+            button.setAttribute("aria-label", "Sort and filter " + headers[col] + (filters[col] ? " (filtered)" : ""));
+          });
+        };
+        form.querySelector("[data-moh-search]").addEventListener("input", event => {
+          search = event.target.value.trim().toLowerCase();
+          renderRows();
+        });
+        form.addEventListener("click", event => {
+          const heading = event.target.closest("[data-moh-sort]");
+          if (heading) {
+            const col = Number(heading.dataset.mohSort);
+            openColumnMenu(heading, headers[col], rows.map(row => display(row, col)), filters[col],
+              dir => { sort = { col, dir }; renderRows(); },
+              selection => { setColumnFilter(filters, col, selection); renderRows(); });
+            return;
+          }
+          const selected = event.target.closest("[data-moh-brand]");
+          if (selected) openInventoryMoh(data, Number(selected.dataset.mohBrand));
+          else if (event.target.closest("[data-moh-back]")) openInventoryMoh(data);
+        });
+        form.addEventListener("keydown", event => {
+          if (!["Enter"," "].includes(event.key) || !event.target.matches("[data-moh-brand]")) return;
+          event.preventDefault();
+          openInventoryMoh(data, Number(event.target.dataset.mohBrand));
+        });
+      } });
+  }
+
+  function dailyAverageCard(total, from, to) {
+    const days = Math.round((Date.parse(to) - Date.parse(from)) / 86400000) + 1;
+    return `<article class="connected-metric"><span>Daily average sales</span><strong>${formatMoney(total / days)}</strong><small>Sales ÷ ${days} calendar day${days === 1 ? "" : "s"} through ${escapeHTML(to)}</small></article>`;
+  }
+
+  function allTimeAnalyticsPanels(ids, facts, isPs, today) {
+    const A = window.BranchlineAnalytics;
+    const allFacts = withHistoryFacts(facts, ids, isPs);
+    let from = "", to = "";
+    for (const row of allFacts) {
+      if (!from || row.date < from) from = row.date;
+      if (!to || row.date > to) to = row.date;
+    }
+    from ||= today; to ||= today;
+    const transactionFacts = withHistoryTransactions(facts, ids, isPs);
+    const totals = A.salesSummary(allFacts, () => "All")[0] || { sales: 0, units: 0 };
+    totals.transactions = transactionFacts.length;
+    const walk = A.walkInSummary({ from: "0001-01-01", to: "9999-12-31", storeCounts: storeCountsFor(ids, isPs),
+      psCounts: liveData.psWalkins.filter(row => ids.has(row.branch_id) && (!isPs || row.ps_id === currentProfile.id)),
+      transactions: transactionFacts });
+    const cards = `<div class="connected-metrics">
+      <article class="connected-metric"><span>All-time sales</span><strong>${formatMoney(totals.sales)}</strong><small>${escapeHTML(`${from} to ${to}`)}</small></article>
+      ${dailyAverageCard(allFacts.filter(row => row.date <= today).reduce((sum, row) => sum + row.amount, 0), from <= today ? from : today, today)}
+      <article class="connected-metric"><span>Transactions</span><strong>${totals.transactions}</strong><small>Average ${totals.transactions ? formatMoney(totals.sales / totals.transactions) : "n/a"}</small></article>
+      <article class="connected-metric"><span>Recorded product units sold</span><strong>${totals.units}</strong><small>Daily summary imports do not provide unit quantities</small></article>
+      <article class="connected-metric"><span>${isPs ? "Clients assisted" : "Walk-in traffic"}</span><strong>${walk.coveredDays ? walk.visitors : "No data"}</strong><small>${walk.coveredDays} counted days</small></article>
+      <article class="connected-metric"><span>Conversion on counted days</span><strong>${walk.conversion === null ? "n/a" : `${(walk.conversion * 100).toFixed(1)}%`}</strong></article>${inventoryMohCard(ids, facts, today)}</div>`;
+    const summaryTable = (key, title, source, group, scopeTotals) => {
+      const counts = new Map();
+      if (scopeTotals) transactionFacts.forEach(row => addTo(counts, group(row), 1));
+      const rows = A.salesSummary(source, group);
+      if (scopeTotals) for (const name of counts.keys()) {
+        if (!rows.some(row => row.key === name)) rows.push({ key: name, sales: 0, units: 0 });
+      }
+      return analyticsDataTable(key, title,
+        "Sales use the Sales Database except October 2026, which uses the monitoring total where supplied. Summary sales never fill other months. Branch/month transaction counts use monitoring where available; product/staff breakdowns show recorded invoices only and cannot attribute summary counts.",
+        ["Group", "Sales", scopeTotals ? "Transactions" : "Recorded invoices", "Recorded units"], rows.map(row =>
+          [row.key, formatMoney(row.sales), scopeTotals ? counts.get(row.key) || 0 : row.unknownUnits ? "Not attributable" : row.transactions, row.unknownUnits ? `${row.units} known; summary quantities unknown` : row.units]));
+    };
+    const detailed = allFacts.map(row => row.summary ? { ...row, brand: "Unknown (daily summary)", category: "Unknown (daily summary)", subCategory: "Unknown (daily summary)", product: "Unknown (daily summary)" } : row);
+    const dimensions = [["year", "Sales by year", row => row.date.slice(0, 4)], ["month", "Sales by month", row => row.date.slice(0, 7)],
+      ["branch", "Sales by branch", row => branchName(row.branchId)], ["brand", "Sales by brand", row => row.brand || "Unclassified"],
+      ["category", "Sales by category", row => row.category || "Unclassified"],
+      ["subcategory", "Sales by sub-category", row => row.subCategory || "Unclassified"],
+      ["product", "Sales by product", row => row.summary ? row.product : `${row.barcode || ""} · ${row.product}`]];
+    if (!isPs) dimensions.push(["ps", "Sales by Product Specialist", row => row.summary ? "Unknown (daily summary)" :
+      liveData.profiles.find(profile => profile.id === row.psId)?.full_name || row.psName || "Former staff"]);
+    const paymentSales = (isPs ? visibleSales() : liveData.sales).filter(row => ids.has(row.branch_id))
+      .map(row => ({ saleId: row.id, amount: saleTotal(row), payment: A.comparisonPaymentMode(row.payment_mode) }));
+    const payment = analyticsDataTable("an-all-payment", "All-time payment mix", "Recorded transactions grouped for comparison: Debit + Credit Card; Cash + COD as Store Operations. Monitoring channels are used only for the last-year comparison.",
+      ["Payment mode", "Sales", "Transactions"], A.salesSummary(paymentSales, row => row.payment).map(row => [row.key, formatMoney(row.sales), row.transactions]));
+    const monthlySales = new Map(A.salesSummary(allFacts, row => `${row.branchId}\0${row.date.slice(0, 7)}`).map(row => [row.key, row.sales]));
+    const targets = analyticsDataTable("an-all-targets", "Recorded monthly targets and results", isPs
+      ? "Store targets are not compared with your personal sales. Individual targets remain in Monthly analysis."
+      : "Each recorded branch/month target is compared with that same branch/month's actuals, not lifetime sales.",
+      isPs ? ["Branch", "Month", "Store target"] : ["Branch", "Month", "Store target", "Actual sales", "Achievement"],
+      liveData.targets.filter(row => ids.has(row.branch_id)).map(row => {
+        const actual = monthlySales.get(`${row.branch_id}\0${row.month.slice(0, 7)}`) || 0;
+        const cells = [branchName(row.branch_id), row.month.slice(0, 7), formatMoney(Number(row.amount))];
+        return isPs ? cells : [...cells, formatMoney(actual), Number(row.amount) > 0 ? percent(actual, Number(row.amount)) : "No target"];
+      }));
+    return `${cards}<p class="an-note">All-time includes all loaded historical dates, independent of the month selector. Sales-value month-end forecasts and monthly pace are shown only in Monthly analysis. Inventory's monthly unit forecast below normalizes recorded product demand across its labelled history. Product-unit totals exclude summary-only imports. Payment mix excludes summary-only imports because they have no payment details.</p>
+      ${dimensions.map(([key, title, group]) => summaryTable(`an-all-${key}`, title, detailed, group, ["year", "month", "branch"].includes(key))).join("")}${payment}${targets}
+      ${inventoryAnalyticsPanels(ids, facts, "0001-01-01", "9999-12-31", today)}`;
+  }
+
+  function renderAnalyticsPage() {
+    const A = window.BranchlineAnalytics;
+    const isPs = currentProfile.role === "ps";
+    const monthSelect = `<label class="field"><span>Month</span><select data-filter="month">${availableMonths().map(month =>
+      `<option value="${month}" ${ui.month === month ? "selected" : ""}>${escapeHTML(monthLabel(month))}</option>`).join("")}</select></label>`;
+    const basisSelect = `<label class="field"><span>Forecast selling days</span><select data-filter="anBasis">${Object.entries(A.RULES).map(([value, rule]) =>
+      `<option value="${value}" ${ui.anBasis === value ? "selected" : ""}>${escapeHTML(rule.label)}</option>`).join("")}</select></label>`;
+    const walkInButton = isPs
+      ? '<button class="button button-outline" type="button" data-open="walkin-ps">Log clients assisted</button>'
+      : "";
+    const allTime = ui.anRange === "all";
+    const rangeSelect = `<label class="field"><span>Analysis period</span><select data-filter="anRange"><option value="month" ${!allTime ? "selected" : ""}>Monthly analysis</option><option value="all" ${allTime ? "selected" : ""}>All-time (all recorded dates)</option></select></label>`;
+    const filters = filterBar({ district: true, branch: true, extra: rangeSelect + (allTime ? "" : monthSelect + basisSelect), actions: walkInButton });
+
+    mountPage(
+      pageHeading("Analytics", "Sales, traffic and inventory analysis. Current stock is separate from historical activity; forecasts are labelled projections."),
+      "",
+      filters,
+      () => {
+        const ids = scopeBranchIds();
+        const month = ui.month;
+        const today = localISODate();
+        const monthStart = A.monthStart(month);
+        const monthEnd = A.monthEnd(month);
+        const isCurrent = month === today.slice(0, 7);
+        const refDate = isCurrent ? today : (month < today.slice(0, 7) ? monthEnd : null);
+        const rules = calendarForecastRules(ids);
+        const facts = analyticsFacts(ids);
+        if (allTime) return allTimeAnalyticsPanels(ids, facts, isPs, today);
+        const allFacts = withHistoryFacts(facts, ids, isPs);
+        const daily = A.dailyTotals(allFacts);
+        const warning = "";
+
+        const psProfiles = liveData.profiles.filter(profile => profile.role === "ps" && profile.active && !isTestProfile(profile) && ids.has(profile.branch_id));
+        const psCountByBranch = new Map();
+        psProfiles.forEach(profile => addTo(psCountByBranch, profile.branch_id, 1));
+        const branchTargets = new Map();
+        liveData.targets.forEach(row => {
+          if (ids.has(row.branch_id) && row.month.slice(0, 7) === month) addTo(branchTargets, row.branch_id, Number(row.amount));
+        });
+        let target;
+        let targetNote;
+        if (isPs) {
+          const count = Number(liveData.psDashboard?.ps_count) || 0;
+          const store = branchTargets.get(currentProfile.branch_id) || 0;
+          target = count ? store / count : 0;
+          targetNote = `Your share: store target ${formatMoney(store)} ÷ ${count} PS${count === 1 ? "" : "s"}`;
+        } else {
+          target = [...branchTargets.values()].reduce((sum, value) => sum + value, 0);
+          targetNote = `${branchTargets.size} branch target${branchTargets.size === 1 ? "" : "s"} for ${monthLabel(month)}`;
+        }
+
+        if (!refDate) {
+          return `${warning}<div class="empty-state">${escapeHTML(monthLabel(month))} has not started yet, so there are no actual results or forecast to show.</div>${inventoryAnalyticsPanels(ids, facts, monthStart, monthEnd, today)}`;
+        }
+
+        const through = refDate > monthEnd ? monthEnd : refDate;
+        const actual = A.sumDaily(daily, monthStart, through);
+        const forecast = A.forecastMonth({ month, refDate, daily, rules, partialDay: isCurrent });
+        const remainingSellingDays = isCurrent ? A.countSellingDays(today, monthEnd, rules) : 0;
+        const pace = A.requiredPace({ target, actual, paceDays: remainingSellingDays });
+        const transactionFacts = withHistoryTransactions(facts, ids, isPs);
+        const transactions = transactionFacts.filter(f => f.date >= monthStart && f.date <= through).length;
+
+        const forecastText = forecast.status === "projected" || forecast.status === "final"
+          ? formatMoney(forecast.value) : "Not enough data";
+        const forecastSmall = forecast.status === "projected"
+          ? `Projection · ${percent(forecast.value, target)} of target · avg ${formatMoney(forecast.rate)} per selling day`
+          : forecast.status === "final" ? "Month complete: this is the actual result"
+            : `Needs at least 5 finished selling days (${forecast.elapsedDays} so far)`;
+        const gapText = target <= 0 ? "No target" : pace.met ? "Target reached" : formatMoney(pace.gap);
+        const gapSmall = target <= 0 ? "Set a target to see the gap"
+          : pace.met ? `Over target by ${formatMoney(actual - target)}`
+            : pace.perDay != null ? `${formatMoney(pace.perDay)} needed per remaining selling day (${remainingSellingDays})` : "No selling days remain";
+        const dailyNeededCard = isPs ? "" : dailySalesNeededCard({ target, actual, month, today, rules });
+        const salesForDay = A.sumDaily(daily, through, through);
+        const salesForDayCount = transactionFacts.filter(f => f.date === through).length;
+        const sharePerPs = isPs || !psProfiles.length ? null : actual / psProfiles.length;
+        const walk = A.walkInSummary({
+          from: monthStart,
+          to: through,
+          storeCounts: storeCountsFor(ids, isPs),
+          psCounts: liveData.psWalkins.filter(row => ids.has(row.branch_id) && (!isPs || row.ps_id === currentProfile.id)),
+          transactions: transactionFacts,
+        });
+        walkInDailyCtx = { ids, isPs, monthStart, through };
+        const walkSource = walk.coveredDays === 0 ? "No counts recorded yet"
+          : isPs ? `${walk.coveredDays} day(s) logged`
+            : `${walk.storeDays} day(s) from store counts, ${walk.psDays} from PS counts`;
+
+        const cards = `<div class="connected-metrics">
+          <article class="connected-metric"><span>Actual sales · ${escapeHTML(monthLabel(month))}${isCurrent ? " (to date)" : ""}</span><strong>${formatMoney(actual)}</strong><small>${escapeHTML(targetNote)}</small></article>
+          <article class="connected-metric"><span>Sales for the Day</span><strong>${formatMoney(salesForDay)}</strong><small>${escapeHTML(through)} · ${salesForDayCount} transaction${salesForDayCount === 1 ? "" : "s"}${isCurrent ? " · today" : " · selected day"}</small></article>
+          ${dailyAverageCard(actual, monthStart, through)}
+          <article class="connected-metric"><span>Target achievement</span><strong>${target > 0 ? percent(actual, target) : "No target"}</strong><small>Target ${target > 0 ? formatMoney(target) : "not set"}</small></article>
+          ${dailyNeededCard}
+          <article class="connected-metric"><span>Remaining gap</span><strong>${gapText}</strong><small>${escapeHTML(gapSmall)}</small></article>
+          <article class="connected-metric an-forecast-card"><span>${forecast.status === "final" ? "Month-end result" : `Forecast month-end <em class="an-badge">Forecast</em>`}</span><strong>${forecastText}</strong><small>${escapeHTML(forecastSmall)}</small></article>
+          <article class="connected-metric"><span>Transactions</span><strong>${transactions}</strong><span>${isPs ? "Clients assisted" : "Walk-in traffic"}</span><strong>${walk.coveredDays ? walk.visitors : "No data"}</strong><small>${escapeHTML(walkSource)}</small><button class="button button-outline button-small wk-daily-btn" type="button" data-open="walkin-daily">View daily</button></article>
+          ${isPs ? "" : `<article class="connected-metric"><span>Sales per PS</span><strong>${sharePerPs === null ? "n/a" : formatMoney(sharePerPs)}</strong><small>${psProfiles.length} active PS${psProfiles.length === 1 ? "" : "s"} in view</small></article>`}
+          <article class="connected-metric"><span>Conversion rate</span><strong>${walk.conversion === null ? "n/a" : `${(walk.conversion * 100).toFixed(1)}%`}</strong><small>${walk.conversion === null ? "Needs recorded walk-in counts" : `${walk.transactions} sale${walk.transactions === 1 ? "" : "s"} ÷ ${walk.visitors} on counted days`}</small></article>
+          ${inventoryMohCard(ids, facts, today)}
+        </div>`;
+
+        const sum = (from, to) => A.sumDaily(daily, from, to);
+        const weekFrom = A.weekStart(through);
+        const comparisons = [
+          ["Day", `${through}${isCurrent ? " (today, still in progress)" : ""}`, sum(through, through), sum(A.addDays(through, -1), A.addDays(through, -1)), "vs previous day"],
+          ["Week to date", `${weekFrom} – ${through}`, sum(weekFrom, through), sum(A.addDays(weekFrom, -7), A.addDays(through, -7)), "vs same days last week"],
+          ["Month to date", `${monthStart} – ${through}`, sum(monthStart, through), sum(A.monthStart(A.shiftMonth(month, -1)), A.sameDayPriorMonth(through)), "vs same days last month"],
+          ["Year to date", `${month.slice(0, 4)}-01-01 – ${through}`, sum(`${month.slice(0, 4)}-01-01`, through), sum(`${Number(month.slice(0, 4)) - 1}-01-01`, A.sameDayPriorYear(through)), "vs same period last year"],
+        ];
+        const comparisonTable = `<div class="connected-table-wrap"><table class="connected-table"><thead><tr><th>Period</th><th>Dates</th><th>Actual</th><th>Prior</th><th>Growth</th></tr></thead><tbody>${comparisons.map(([name, dates, current, prior, note]) =>
+          `<tr><td>${escapeHTML(name)}<br><small class="an-muted">${escapeHTML(note)}</small></td><td>${escapeHTML(dates)}</td><td>${formatMoney(current)}</td><td>${formatMoney(prior)}</td><td>${growthCell(A.growth(current, prior))}</td></tr>`).join("")}</tbody></table></div>`;
+
+        const current = { from: monthStart, to: through };
+        const previous = { from: A.monthStart(A.shiftMonth(month, -1)), to: A.sameDayPriorMonth(through) };
+        const dims = [["brand", "Brand"], ["product", "Product"]];
+        if (!isPs) dims.push(["ps", "Product Specialist"]);
+        if (!isPs && ids.size > 1) dims.push(["branch", "Branch"]);
+        if (!isPs && new Set([...ids].map(id => liveData.branches.find(b => b.id === id)?.district_id)).size > 1) dims.push(["district", "District"]);
+        const dim = dims.some(([value]) => value === ui.anDim) ? ui.anDim : "brand";
+        const keyOf = {
+          brand: f => f.brand,
+          product: f => f.product,
+          ps: f => liveData.profiles.find(p => p.id === f.psId)?.full_name || titleCase(f.psName || "") || "Staff member",
+          branch: f => branchName(f.branchId),
+          district: f => branchDistrictName(f.branchId),
+        }[dim];
+        const trendP = resolvePeriod("pdTrend", month, through);
+        const trend = A.groupTrend(facts, keyOf, { from: trendP.from, to: trendP.to }, { from: trendP.prevFrom, to: trendP.prevTo });
+        const dimLabel = dims.find(([value]) => value === dim)[1];
+        const metaOf = new Map();
+        facts.forEach(f => { if (!metaOf.has(keyOf(f))) metaOf.set(keyOf(f), f); });
+        const withProduct = dim === "product";
+        const trendHead = [...(withProduct ? ["Brand", "Category", "Sub-category"] : []), dimLabel, trendP.name, "Prior period", "Growth", "Share"];
+        const trendPanel = panel(`Trend by ${dimLabel.toLowerCase()}`, `${trendP.label} vs ${trendP.note}.`,
+          tableBlock("an-trend", trendHead, trend,
+            row => {
+              const meta = metaOf.get(row.key) || {};
+              const link = dim === "ps" && meta.psId ? ` class="rank-row" data-ps-detail="${escapeHTML(meta.psId)}" tabindex="0"`
+                : dim === "brand" ? ` class="rank-row" data-brand-detail="${escapeHTML(row.key)}" data-brand-from="${trendP.from}" data-brand-through="${trendP.to}" tabindex="0"` : "";
+              const lead = withProduct ? `<td>${escapeHTML(meta.brand || "—")}</td><td>${escapeHTML(meta.category || "—")}</td><td>${escapeHTML(meta.subCategory || "—")}</td>` : "";
+              return `<tr${link}>${lead}<td>${escapeHTML(row.key)}</td><td>${formatMoney(row.current)}</td><td>${formatMoney(row.previous)}</td><td>${growthCell(row.growth)}</td><td>${row.share === null ? "n/a" : (row.share * 100).toFixed(1) + "%"}</td></tr>`;
+            },
+            "No sales in this period."),
+          `${periodControl("pdTrend", through)}<label class="field an-inline"><span class="visually-hidden">Group by</span><select data-filter="anDim">${dims.map(([value, label]) =>
+            `<option value="${value}" ${dim === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>`);
+
+        let psPanel = "";
+        let psEntries = [];
+        if (!isPs) {
+          const entries = psProfiles.map(profile => {
+            const count = psCountByBranch.get(profile.branch_id) || 0;
+            const share = count ? (branchTargets.get(profile.branch_id) || 0) / count : 0;
+            const own = facts.filter(f => f.psId === profile.id && f.branchId === profile.branch_id && f.date >= monthStart && f.date <= through)
+              .reduce((total, f) => total + f.amount, 0);
+            return { id: profile.id, name: profile.full_name || "Staff member", branch: branchName(profile.branch_id), actual: own, target: share };
+          });
+          psEntries = entries.map(entry => ({ ...entry, achievement: A.achievement(entry.actual, entry.target) }));
+          const expectedMtd = A.expectedFraction({ month, refDate, rules, partialDay: isCurrent });
+          const entriesFor = p => (p.mode === "mtd" && !p.custom ? entries : psProfiles.map(profile => {
+            const count = psCountByBranch.get(profile.branch_id) || 0;
+            const own = facts.filter(f => f.psId === profile.id && f.branchId === profile.branch_id && f.date >= p.from && f.date <= p.to)
+              .reduce((total, f) => total + f.amount, 0);
+            return { id: profile.id, name: profile.full_name || "Staff member", branch: branchName(profile.branch_id), actual: own, target: count ? periodTarget(profile.branch_id, p) / count : 0 };
+          }));
+          const topP = resolvePeriod("pdTop", month, through);
+          const attnP = resolvePeriod("pdAttn", month, through);
+          const row = expected => entry => {
+            const behind = expected !== null && entry.achievement < expected;
+            const pace = expected === null ? '<span class="an-muted">—</span>' : behind ? '<span class="an-down">Behind pace</span>' : '<span class="an-up">On pace</span>';
+            return `<tr class="rank-row" data-ps-detail="${escapeHTML(entry.id)}" tabindex="0"><td>${escapeHTML(entry.name)}<br><small class="an-muted">${escapeHTML(entry.branch)}</small></td><td>${formatMoney(entry.actual)}</td><td>${formatMoney(entry.target)}</td><td>${(entry.achievement * 100).toFixed(1)}%</td><td>${pace}</td></tr>`;
+          };
+          const headNames = ["Product Specialist", "Actual", "Individual target", "Achievement", "Pace"];
+          const table = (list, expected, key) => list.length
+            ? sortableTable(`sort-${key}`, headNames, list, row(expected))
+            : '<div class="empty-state">Not enough Product Specialists with a target to rank.</div>';
+          const exportHead = ["Product Specialist", "Branch", "Actual", "Individual target", "Achievement", "Pace"];
+          const exportRow = expected => entry => {
+            const behind = expected !== null && entry.achievement < expected;
+            return `<tr><td>${escapeHTML(entry.name)}</td><td>${escapeHTML(entry.branch)}</td><td>${formatMoney(entry.actual)}</td><td>${formatMoney(entry.target)}</td><td>${(entry.achievement * 100).toFixed(1)}%</td><td>${expected === null ? "—" : behind ? "Behind pace" : "On pace"}</td></tr>`;
+          };
+          const rankPanel = (title, p, key, pick, detail) => {
+            const list = entriesFor(p);
+            const result = A.topAndBottom(list, 3);
+            const expected = p.mode === "mtd" && !p.custom ? expectedMtd : null;
+            const skipped = list.length - result.ranked;
+            const notes = `${expected === null ? "" : ` Expected progress by now: ${(expected * 100).toFixed(1)}% of the month's selling days.`}${skipped ? ` ${skipped} PS${skipped === 1 ? "" : "s"} without a branch target are not ranked.` : ""}`;
+            const shown = pick(result);
+            return panel(title, `${p.label}. ${detail}${notes}${p.mode === "day" ? " Daily target = monthly target ÷ days in the month." : ""}`, table(shown, expected, key), `${periodControl(key, through)}${manualExport(`an-${title.toLowerCase().replace(/\W+/g, "-")}`, title, exportHead, shown, exportRow(expected))}`);
+          };
+          psPanel = `${rankPanel("Top performers", topP, "pdTop", result => result.top, "Individual target = branch target ÷ active PSs in the branch.")}
+            ${rankPanel("Needs attention", attnP, "pdAttn", result => result.bottom, "Lowest target achievement.")}`;
+        }
+
+        const trafficCtx = trafficContext(facts, ids, isPs);
+        const yearIds = panelIds("bpYear", ids);
+        const yearCtx = yearIds === ids ? trafficCtx : trafficContext(facts.filter(f => yearIds.has(f.branchId)), yearIds, isPs);
+        const traffic = trafficPanels(A, trafficCtx, month, through, yearCtx, panelBranchSelect("bpYear", ids));
+        const mtdPeriod = traffic.periods.find(item => item.name === "Month to date");
+        const mix = computePaymentMix(month, ids, through);
+        const mixP = resolvePeriod("pdMix", month, through);
+        const mixIds = panelIds("bpMix", ids);
+        const mixView = mixP.mode === "mtd" && !mixP.custom && mixIds === ids ? mix : computePaymentMix(month, mixIds, through, mixP);
+        const mixBranch = mixIds === ids ? "" : ` · ${branchName([...mixIds][0])}`;
+        const mixLabel = `${mixP.mode === "mtd" && !mixP.custom ? `${monthLabel(month)}${isCurrent ? " (to date)" : ""}` : mixP.label}${mixBranch}`;
+        const brandTrend = A.groupTrend(facts, f => f.brand, current, previous);
+        const priceFacts = facts.filter(f => f.date >= monthStart && f.date <= through);
+        const insights = A.buildInsights({
+          fmt: formatMoney,
+          target, achievement: A.achievement(actual, target), expected: A.expectedFraction({ month, refDate, rules, partialDay: isCurrent }),
+          forecast, pace, elapsedDays: Number(through.slice(8, 10)),
+          mtd: { sales: mtdPeriod.cur.sales, priorSales: mtdPeriod.prev.sales },
+          traffic: {
+            visitors: mtdPeriod.cur.visitors, priorVisitors: mtdPeriod.prev.visitors,
+            coveredDays: mtdPeriod.cur.covered, priorCoveredDays: mtdPeriod.prev.covered,
+            transactions: mtdPeriod.cur.matched, priorTransactions: mtdPeriod.prev.matched,
+            conversion: mtdPeriod.cur.conversion, priorConversion: mtdPeriod.prev.conversion,
+            avgTicket: mtdPeriod.cur.avgTicket, priorAvgTicket: mtdPeriod.prev.avgTicket,
+          },
+          brands: brandTrend, priorBrandTotal: brandTrend.reduce((sum, row) => sum + row.previous, 0),
+          ps: psEntries,
+          paymentMix: mix,
+          pricing: { sold: priceFacts.reduce((sum, f) => sum + f.soldAmount, 0), srpBasis: priceFacts.reduce((sum, f) => sum + f.srpAmount, 0) },
+        });
+
+        const missing = `<p class="an-note">Walk-in traffic and conversion use only days with a recorded count. A store count entered by a manager overrides the sum of PS counts. Nothing is estimated.</p>`;
+        return `${warning}${cards}${insightsPanel(insights)}${panel("Period comparison", "Growth compares like-for-like elapsed days.", comparisonTable, manualExport("an-compare", "Period comparison", ["Period", "Comparison", "Dates", "Actual", "Prior", "Growth"], comparisons,
+          ([name, dates, current, prior, note]) => { const g = A.growth(current, prior); return `<tr><td>${escapeHTML(name)}</td><td>${escapeHTML(note)}</td><td>${escapeHTML(dates)}</td><td>${formatMoney(current)}</td><td>${formatMoney(prior)}</td><td>${g === null ? "n/a" : (g * 100).toFixed(1) + "%"}</td></tr>`; }))}${traffic.compare}${traffic.trend}${paymentMixPanels(month, mixView, mixLabel, `${panelBranchSelect("bpMix", ids)}${periodControl("pdMix", through)}`)          }${trendPanel}${psPanel}${missing}${inventoryAnalyticsPanels(ids, facts, monthStart, through, today)}`;
+      },
+    );
+  }
+
+  function renderOverview() {
+    return mountPage(
+      pageHeading("Overview", demoStore ? `Local demo data for ${monthLabel(ui.month)}. Role preview only—not a real account.` : `Live data for ${monthLabel(ui.month)}. Access is enforced by Supabase.`),
+      "",
+      filterBar({ district: true, branch: true, period: true, actions: exportButton("data-export-all", "Export all tables") }),
+      () => {
+        const month = anchorMonth();
+        const label = statusLabel();
+        const rows = branchRows();
+        const brands = brandRows(panelIds("brandBranch", scopeBranchIds()));
+        const totalSales = rows.reduce((total, row) => total + row.actual, 0);
+        const totalTarget = rows.reduce((total, row) => total + row.target, 0);
+        const totalYtd = rows.reduce((total, row) => total + row.ytd, 0);
+        const totalYtdTarget = rows.reduce((total, row) => total + row.ytdTarget, 0);
+        const periodTargetLabel = ui.period === "year" ? "Year-to-date target" : "Monthly target";
+        const isPs = currentProfile.role === "ps";
+        const charts = isPs ? psTargetCharts(label) : [progressChart(totalSales, totalTarget, label)];
+        if (isPs) charts.push(brandProgressChart(label));
+        if (rows.length > 1) {
+          charts.push(pieChart("Sales by branch", label, rows.map(row => ({ label: row.branch.name, value: row.actual })), { tableKey: "branches" }));
+        }
+        charts.push(brandPie("Sales by brand", label, brands.map(row => ({ label: row.brand, value: row.actual }))));
+        return `<div class="connected-metrics">
+            <article class="connected-metric"><span>Branches in view</span><strong>${rows.length}</strong></article>
+            <article class="connected-metric"><span>Sales · ${escapeHTML(label)}</span><strong>${formatMoney(totalSales)}</strong></article>
+            <article class="connected-metric"><span>${periodTargetLabel}</span><strong>${formatMoney(totalTarget)}</strong></article>
+            <article class="connected-metric"><span>Year-to-date sales</span><strong>${formatMoney(totalYtd)}</strong><small>YTD target ${formatMoney(totalYtdTarget)} · ${percent(totalYtd, totalYtdTarget)}</small></article>
+          </div>
+          <div class="connected-charts">${charts.join("")}</div>
+          ${overviewPaymentPanels("pies")}
+          ${managementAttentionPanel(rows, brands)}${psRankingPanel()}${psIndividualTargetPanel()}${managementReportPanel()}`;
+      },
+    );
+  }
+
+  function brandPerformancePanel() {
+    return panel("Brand performance", "Click a heading to sort. Click a row to see its products.", brandTable(brandRows(panelIds("brandBranch", scopeBranchIds())), "No brand sales for this selection."), brandPanelControl());
+  }
+
+  function branchPerformancePanel() {
+    return panel("Accessible branch performance", "Ordered by district, then branch.", tableBlock(
+      "branches",
+      ["Branch", "District", "Sales", "Target", "Progress", "YTD sales"],
+      branchRows(),
+      row => `<tr><td><strong>${escapeHTML(row.branch.name)}</strong></td><td>${escapeHTML(row.district)}</td><td>${formatMoney(row.actual)}</td><td>${formatMoney(row.target)}</td><td>${percent(row.actual, row.target)}</td><td>${formatMoney(row.ytd)}</td></tr>`,
+      "No branches match this selection.",
+      5,
+    ));
+  }
+
+  function serialsFor(saleId, barcode) {
+    return (liveData.serialsBySale.get(saleId) || []).filter(row => !barcode || row.barcode === barcode).map(row => row.serial);
+  }
+
+  function addressOf(sale) {
+    return [sale.barangay, sale.city].filter(Boolean).join(", ");
+  }
+
+  function renderSalesPage(dailyTable = false) {
+    const isPs = currentProfile.role === "ps";
+    return mountPage(
+      pageHeading("Sales", isPs ? "Your sales for branches you are assigned to." : "Sales visible to your role and assigned branches."),
+      "",
+      filterBar({
+        district: true,
+        branch: true,
+        period: true,
+        actions: `${isPs || currentProfile.role === "admin" ? '<button class="button button-primary record-sale-floating" type="button" data-open="sale">+ Record sale</button>' : ""}${["ps","manager","district_manager","admin"].includes(currentProfile.role) ? '<button class="button button-outline" type="button" data-open="sales-return">&minus; Sales return</button>' : ""}`,
+      }),
+      () => {
+        const ids = scopeBranchIds();
+        const query = searchQuery();
+        const logRange = Boolean(ui.logFrom || ui.logTo);
+        const logSource = [...visibleSales(), ...liveData.testSales.filter(sale => !isPs || sale.ps_id === currentProfile.id)];
+        const sales = logSource
+          .filter(sale => ids.has(sale.branch_id)
+            && (logRange ? (!ui.logFrom || sale.sold_on >= ui.logFrom) && (!ui.logTo || sale.sold_on <= ui.logTo) : inPeriod(sale.sold_on)))
+          .map(sale => ({
+            sale,
+            isTest: isTestSale(sale, liveData.testPsIds),
+            branch: branchName(sale.branch_id),
+            person: isPs ? "You" : liveData.profiles.find(profile => profile.id === sale.ps_id)?.full_name || titleCase(sale.ps_name || "") || "Staff member",
+            lines: linesForSale(sale.id),
+            products: linesForSale(sale.id).map(line => `${line.brand} ${line.category} ${line.sub_category} ${line.model_description}`).join(", "),
+            qty: linesForSale(sale.id).reduce((sum, line) => sum + Number(line.quantity || 0), 0),
+            serials: serialsFor(sale.id),
+            total: saleTotal(sale),
+          }))
+          .filter(row => matches(query, row.sale.invoice_number, row.sale.customer_name, row.products, row.person, row.branch, addressOf(row.sale), row.serials.join(" ")))
+          .sort((a, b) => String(b.sale.sold_on).localeCompare(String(a.sale.sold_on)) || String(b.sale.created_at).localeCompare(String(a.sale.created_at)));
+        const total = sales.filter(row => !row.isTest).reduce((sum, row) => sum + row.total, 0);
+        const testCount = sales.filter(row => row.isTest).length;
+        salesLogExport = new Set(sales.map(row => row.sale.id));
+        const logFilters = `<label class="field log-filter"><span>From (sales log)</span><input type="date" data-filter="logFrom" value="${escapeHTML(ui.logFrom)}"></label><label class="field log-filter"><span>To (sales log)</span><input type="date" data-filter="logTo" value="${escapeHTML(ui.logTo)}"></label>${logRange ? '<button class="button button-outline" type="button" data-log-clear>Clear dates</button>' : ""}`;
+        const tools = `<div class="table-tools log-tools">${logFilters}<label class="field log-filter log-search"><span>Search</span><input type="search" data-filter="search" placeholder="Invoice, customer, product, staff" value="${escapeHTML(ui.search)}" autocomplete="off"></label>${exportButton('data-export="sales"', "Download sales")}</div>`;
+        const rangeNote = logRange ? `${ui.logFrom || "start"} to ${ui.logTo || "today"} · ` : ui.period === "day" ? "this day only · " : "";
+
+        // Totals above the log: one card per branch for district managers and above, one card otherwise.
+        const todayISO = localISODate();
+        const dayFocus = ui.period === "day" ? periodDay() : todayISO;
+        const cardFrom = logRange ? ui.logFrom || "0000-01-01" : dayFocus;
+        const cardTo = logRange ? ui.logTo || "9999-12-31" : dayFocus;
+        const cardWhen = logRange ? `${ui.logFrom || "start"} to ${ui.logTo || "today"}` : dayFocus === todayISO ? `today, ${dayFocus}` : dayFocus;
+        const cardIds = ids;
+        const recordedFacts = analyticsFacts(ids);
+        const allSaleFacts = withHistoryFacts(recordedFacts, ids, isPs)
+          .filter(fact => !isPs || fact.psId === currentProfile.id);
+        const transactionFacts = withHistoryTransactions(recordedFacts, ids, isPs);
+        const totalOf = (from, to, branches) => ({
+          total: allSaleFacts.filter(f => f.date >= from && f.date <= to && branches.has(f.branchId)).reduce((sum, f) => sum + f.amount, 0),
+          count: transactionFacts.filter(f => f.date >= from && f.date <= to && branches.has(f.branchId)).length,
+        });
+        const cardList = canPickBranch()
+          ? [...cardIds].map(id => ({ name: branchName(id), ...totalOf(cardFrom, cardTo, new Set([id])) })).sort((a, b) => natural(a.name, b.name))
+          : [{ name: isPs ? logRange ? "My date-range sales" : "My daily sales" : "Total sales", ...totalOf(cardFrom, cardTo, cardIds) }];
+        const logTotalCard = isPs ? `<article class="connected-metric log-total-highlight"><span>My total sales · matching sales log</span><strong>${formatMoney(total)}</strong><small>${sales.length - testCount} sale${sales.length - testCount === 1 ? "" : "s"} · follows the log's period, dates and search; excludes TEST sales</small></article>` : "";
+        const totalsCards = `<div class="connected-metrics log-totals${isPs ? " ps-log-totals" : ""}">${logTotalCard}${cardList.map(card =>
+          `<article class="connected-metric"><span>${escapeHTML(card.name)} · ${escapeHTML(cardWhen)}</span><strong>${formatMoney(card.total)}</strong><small>${card.count} sale${card.count === 1 ? "" : "s"}${logRange ? "" : " · pick From and To to total a date range"}</small></article>`).join("")}</div>`;
+
+        // Daily summary: totals only, for any month and year.
+        const years = new Set([todayISO.slice(0, 4), (ui.month || currentMonth()).slice(0, 4)]);
+        allSaleFacts.forEach(f => years.add(f.date.slice(0, 4)));
+        transactionFacts.forEach(f => years.add(f.date.slice(0, 4)));
+        const yearList = [...years].sort().reverse();
+        const dsYear = yearList.includes(ui.dsYear) ? ui.dsYear : (ui.month || currentMonth()).slice(0, 4);
+        const dsMonth = /^(0[1-9]|1[0-2])$/.test(ui.dsMonth) ? ui.dsMonth : (ui.month || currentMonth()).slice(5, 7);
+        const dsPrefix = `${dsYear}-${dsMonth}`;
+        const dailyIds = panelIds("dsBranch", ids);
+        const storeCounts = storeCountsFor(dailyIds, isPs);
+        const psCounts = liveData.psWalkins.filter(row => dailyIds.has(row.branch_id) && (!isPs || row.ps_id === currentProfile.id));
+        const transactions = withHistoryTransactions(analyticsFacts(dailyIds), dailyIds, isPs);
+        const dayRows = [];
+        for (let day = new Date(Number(dsYear), Number(dsMonth), 0).getDate(); day >= 1; day -= 1) {
+          const date = `${dsPrefix}-${String(day).padStart(2, "0")}`;
+          if (date > todayISO) continue;
+          const traffic = window.BranchlineAnalytics.walkInSummary({ from: date, to: date, storeCounts, psCounts, transactions });
+          dayRows.push({ date, ...totalOf(date, date, dailyIds), traffic: { ...traffic, partial: traffic.coveredDays > 0 && traffic.coveredDays < dailyIds.size } });
+        }
+        const monthTotal = totalOf(`${dsPrefix}-01`, `${dsPrefix}-31` > todayISO ? todayISO : `${dsPrefix}-31`, dailyIds);
+        const monthOptions = Array.from({ length: 12 }, (_, index) => {
+          const value = String(index + 1).padStart(2, "0");
+          return `<option value="${value}" ${value === dsMonth ? "selected" : ""}>${new Date(2000, index, 1).toLocaleString("en-PH", { month: "long" })}</option>`;
+        }).join("");
+        const dailyControls = `${panelBranchSelect("dsBranch", ids)}<label class="field an-inline"><span class="visually-hidden">Month</span><select data-filter="dsMonth">${monthOptions}</select></label><label class="field an-inline"><span class="visually-hidden">Year</span><select data-filter="dsYear">${yearList.map(value =>
+          `<option value="${value}" ${value === dsYear ? "selected" : ""}>${value}</option>`).join("")}</select></label>`;
+        const dailyContent = dailyTable
+          ? tableBlock("dailysum", ["Date", "Day", "No. of sales", "Total sales"], dayRows,
+            row => `<tr class="sale-summary-row" data-daily-sales-table-date="${escapeHTML(row.date)}" tabindex="0"><td>${escapeHTML(row.date)}</td><td>${escapeHTML(new Date(`${row.date}T00:00:00`).toLocaleDateString("en-PH", { weekday: "long" }))}</td><td>${row.count}</td><td>${formatMoney(row.total)}</td></tr>`,
+            "No days to show for this month yet.", 31)
+          : `${dailySalesChart(dayRows, dsPrefix, todayISO, isPs)}<div class="daily-table-action"><button class="button button-outline button-small" type="button" data-pie-table="dailysum" aria-label="View daily sales summary table">View table</button></div>`;
+        const dailyBranchNote = dailyIds !== ids ? `${branchName([...dailyIds][0])} · ` : "";
+        const dailySummary = panel("Daily sales summary", `${isPs ? "Your account's sales only · " : "Database sales; October 2026 uses supplied summary totals. Summary transaction counts where available · "}${dailyBranchNote}${monthLabel(dsPrefix)} · ${formatMoney(monthTotal.total)} · ${monthTotal.count} transaction${monthTotal.count === 1 ? "" : "s"}`,
+          dailyContent, dailyControls);
+        return `${panel(isPs ? "My sales log" : "Sales log", `${isPs ? "" : `${sales.length - testCount} sale${sales.length - testCount === 1 ? "" : "s"} · ${formatMoney(total)} · `}${rangeNote}${testCount ? `${testCount} TEST (not counted) · ` : ""}ordered by sale date, newest first. Click a transaction to view details; click a column heading to sort.`, totalsCards + tableBlock(
+            "sales",
+            ["Transaction / Invoice", "Customer", "Sale date", "Product Specialist", "Branch", "Total"],
+            sales,
+            saleSummaryRowHTML,
+            "No sales match these filters.",
+          ), tools)}${deliveryMonitoringPanel(sales.filter(row => !row.isTest).map(row => row.sale))}${dailySummary}${isPs ? brandLogPanel() : ""}`;
+      },
+    );
+  }
+
+  let deliveryGroups = [];
+  function fulfillmentLabel(sale) {
+    return sale.fulfillment_method === "delivery" ? "Delivery" : sale.fulfillment_method === "pickup" ? "Pick up" : "Not specified";
+  }
+
+  function deliveryExport(sales) {
+    const groups = window.BranchlineDelivery.monitoring(sales.filter(sale => !isTestSale(sale, liveData.testPsIds)), liveData.deliveryGuaranties, liveData.profiles);
+    return { name: "Delivery Guarranty", rows: [
+      ["PS", "Customer", "Address", "Invoice", "Date", "Branch", "DG qty", "DG amount (not sales)"],
+      ...groups.flatMap(group => group.sales.map(sale => [group.name, sale.customer_name, addressOf(sale), sale.invoice_number, sale.sold_on, branchName(sale.branch_id), 1, sale.dg_amount])),
+      ["TOTAL", "", "", "", "", "", groups.reduce((sum, group) => sum + group.quantity, 0), groups.reduce((sum, group) => sum + group.amount, 0)],
+    ] };
+  }
+  function deliveryMonitoringPanel(sales) {
+    deliveryGroups = [];
+    if (!["manager", "district_manager", "admin"].includes(currentProfile.role)) return "";
+    deliveryGroups = window.BranchlineDelivery.monitoring(sales, liveData.deliveryGuaranties, liveData.profiles);
+    const total = deliveryGroups.reduce((sum, group) => sum + group.amount, 0);
+    const quantity = deliveryGroups.reduce((sum, group) => sum + group.quantity, 0);
+    return panel("DELIVERY GUARRANTY", `${quantity} invoice(s) · DG fees only, excluded from sales and targets. Uses the sales log's branch, date and search filters.`,
+      `<div class="delivery-total-banner"><span>TOTAL DELIVERY GUARANTY AMOUNT</span><strong>${formatMoney(total)}</strong></div>` + tableBlock("delivery-guarranty", ["PS name", "Qty of sales with DG", "Total amount"], deliveryGroups,
+        group => `<tr class="sale-summary-row" data-delivery-person="${escapeHTML(group.key)}" tabindex="0" aria-label="View Delivery Guarranty for ${escapeHTML(group.name)}"><td>${escapeHTML(group.name)}</td><td>${group.quantity}</td><td>${formatMoney(group.amount)}</td></tr>`,
+        "No Delivery Guarranty fees match these filters."));
+  }
+
+  function openDeliveryDetails(key) {
+    if (!["manager", "district_manager", "admin"].includes(currentProfile.role)) return;
+    const group = deliveryGroups.find(item => item.key === key);
+    if (!group) throw new Error("Delivery Guarranty summary changed. Refresh the sales view.");
+    const renderTable = () => tableBlock("delivery-customers", ["Customer", "Address", "Invoice", "Date", "Amount"],
+      group.sales, sale => `<tr class="sale-summary-row" data-sale-details="${escapeHTML(sale.id)}" tabindex="0"><td>${escapeHTML(sale.customer_name)}</td><td>${escapeHTML(addressOf(sale) || "Not recorded")}</td><td>${escapeHTML(sale.invoice_number)}</td><td>${escapeHTML(sale.sold_on)}</td><td>${formatMoney(sale.dg_amount)}</td></tr>`, "No matching fees.");
+    openModal({ title: `DELIVERY GUARRANTY · ${group.name}`, readOnly: true, wide: true,
+      body: `<p>${group.quantity} invoice(s) · DG fees only</p><div data-delivery-table>${renderTable()}</div>
+        <p class="delivery-total-modal"><strong>Total amount: ${formatMoney(group.amount)}</strong></p>`, onReady: form => {
+        bindSaleDetailRows(form);
+        bindModalTable(form.querySelector("[data-delivery-table]"), renderTable);
+      } });
+  }
+
+  function saleSummaryRowHTML(row) {
+    return `<tr class="sale-summary-row${row.isTest ? " test-row" : ""}" data-sale-details="${escapeHTML(row.sale.id)}" tabindex="0" aria-label="View transaction ${escapeHTML(row.sale.invoice_number)}"><td>${escapeHTML(row.sale.invoice_number)}${row.isTest ? ' <span class="test-badge">TEST – not counted</span>' : ""}</td><td>${escapeHTML(row.sale.customer_name)}</td><td>${escapeHTML(row.sale.sold_on)}</td><td>${escapeHTML(row.person)}</td><td>${escapeHTML(row.branch)}</td><td><strong>${formatMoney(row.total)}</strong></td></tr>`;
+  }
+
+  // One product line: brand · category · sub-category, then the description and quantity.
+  function productLineHTML(line) {
+    const meta = [line.brand, line.category, line.sub_category].filter(Boolean).map(escapeHTML).join(" · ");
+    return `<div class="product-line"><span class="pl-meta">${meta}</span>${escapeHTML(line.model_description)} × ${escapeHTML(line.quantity)}</div>`;
+  }
+
+  function saleProductsHTML(saleId, lines) {
+    const offsets = new Map();
+    return `<div class="connected-table-wrap sale-detail-products"><table class="connected-table"><thead><tr><th>Product</th><th>Serial number</th><th>Qty</th><th>Unit price</th></tr></thead><tbody>${lines.length ? lines.map(line => {
+      const start = offsets.get(line.barcode) || 0;
+      const quantity = Number(line.quantity);
+      const units = Math.abs(quantity);
+      const serials = liveData.returnSerialsByLine?.get(line.id) || serialsFor(saleId, line.barcode).slice(start, start + units);
+      offsets.set(line.barcode, start + units);
+      const meta = [line.brand, line.category, line.sub_category].filter(Boolean).map(escapeHTML).join(" · ");
+      return `<tr><td><div class="product-line"><span class="pl-meta">${meta}</span>${escapeHTML(line.model_description)}<small class="sale-detail-barcode">Barcode: ${escapeHTML(line.barcode)}</small>${line.srp == null ? "" : `<small class="sale-detail-barcode">SRP: ${formatMoney(Number(line.srp))}</small>`}</div></td><td class="sale-product-serials">${serials.length ? serials.map(serial => `<div>${escapeHTML(serial)}</div>`).join("") : "—"}</td><td>${quantity}</td><td>${formatMoney(Number(line.selling_price))}</td></tr>`;
+    }).join("") : '<tr><td colspan="4">No product details recorded.</td></tr>'}</tbody></table></div>`;
+  }
+
+  const canCorrectBundleSale = role => ["manager", "district_manager", "admin"].includes(role);
+
+  function openSaleDetails(saleId, returnToHistory) {
+    const ids = scopeBranchIds();
+    const sale = [...visibleSales(), ...liveData.testSales.filter(item => currentProfile.role !== "ps" || item.ps_id === currentProfile.id)]
+      .find(item => item.id === saleId && ids.has(item.branch_id));
+    if (!sale) throw new Error("This transaction is no longer available in your sales scope. Refresh the sales view.");
+    const lines = linesForSale(sale.id);
+    const canEdit = currentProfile.role === "ps" || canCorrectBundleSale(currentProfile.role);
+    const fee = ["manager", "district_manager", "admin"].includes(currentProfile.role)
+      ? liveData.deliveryGuaranties.find(item => item.sale_id === sale.id)?.amount : null;
+    const detail = (label, value) => `<div><dt>${label}</dt><dd>${escapeHTML(value || "—")}</dd></div>`;
+    const person = liveData.profiles.find(profile => profile.id === sale.ps_id)?.full_name || titleCase(sale.ps_name || "") || "Staff member";
+    openModal({ title: `Transaction · ${sale.invoice_number}`, readOnly: true, wide: true,
+      headerAction: exportButton("data-transaction-export", "Download transaction"),
+      intro: isTestSale(sale, liveData.testPsIds) ? "TEST transaction — not counted in sales totals." : "",
+      body: `${returnToHistory ? '<button class="button button-outline button-small" type="button" data-return-customer>← Back to Purchase History</button>' : ""}<dl class="sale-detail-info">${detail("Customer", sale.customer_name)}${detail("Address", addressOf(sale))}${detail("Sale date", sale.sold_on)}${detail("Product Specialist", person)}${detail("Branch", branchName(sale.branch_id))}${detail("Payment", sale.payment_mode)}${detail("Delivery / Pick up", fulfillmentLabel(sale))}${detail("Recorded", new Date(sale.created_at).toLocaleString("en-PH", { dateStyle: "medium", timeStyle: "short" }))}</dl>
+        <div data-sale-promotions role="status">${demoStore ? "" : "Checking promotion details..."}</div>
+        ${saleProductsHTML(sale.id, lines)}
+        <div class="sale-detail-total"><span>Total quantity: ${lines.reduce((sum, line) => sum + Number(line.quantity), 0)}</span><strong>Transaction total: ${formatMoney(saleTotal(sale, "price"))}</strong></div>
+        ${ui.salesBasis === "srp" ? `<p class="an-note">SRP comparison total (selling-price fallback): ${formatMoney(saleTotal(sale))}. Original transaction prices above are unchanged.</p>` : ""}
+        ${fee == null ? "" : `<p>Delivery Guarranty: ${formatMoney(Number(fee))} · Not included in sales total.</p>`}
+        <div class="sale-log-actions">${canEdit ? `<button class="button button-outline" type="button" data-edit-sale="${escapeHTML(sale.id)}">Edit</button>` : ""}${currentProfile.role === "admin" ? `<button class="button button-outline button-danger" type="button" data-delete-sale="${escapeHTML(sale.id)}">Delete</button>` : ""}</div>`,
+      onReady: form => {
+        const download = form.closest(".dlg").querySelector("[data-transaction-export]");
+        download.addEventListener("click", () => chooseExportFormat(download, format => {
+          const metadata = [...form.querySelectorAll(".sale-detail-info > div")].map(field =>
+            [field.querySelector("dt").textContent, field.querySelector("dd").textContent]);
+          const products = tableElementSheet(form.querySelector(".sale-detail-products table"), "Products");
+          const name = "Transaction " + sale.invoice_number;
+          const filename = "branchline-invoice-" + sale.invoice_number.replace(/[^a-z0-9_-]/gi, "-");
+          if (format === "pdf") {
+            const totals = [...form.querySelector(".sale-detail-total").children].map(item => item.textContent);
+            return downloadReportPdf([products], filename, { name, metadata, totals });
+          }
+          return downloadTransactionExcel(name, metadata, products.rows, {
+            quantity: lines.reduce((sum, line) => sum + Number(line.quantity), 0),
+            amount: saleTotal(sale, "price"),
+          }, filename);
+        }));
+        if (returnToHistory) form.querySelector("[data-return-customer]").addEventListener("click", returnToHistory);
+        form.addEventListener("click", event => {
+          const editButton = event.target.closest("[data-edit-sale]");
+          if (canEdit && editButton) openEditSaleModal(sale, editButton);
+          else if (currentProfile.role === "admin" && event.target.closest("[data-delete-sale]")) openDeleteSaleModal(sale);
+        });
+        if (demoStore) return;
+        const detailClient = client, profileId = currentProfile.id;
+        const actions = [...form.querySelectorAll("[data-edit-sale],[data-delete-sale]")];
+        actions.forEach(button => { button.disabled = true; });
+        detailClient.from("sale_promotion_groups").select("barcode,description,bundle_total").eq("sale_id", sale.id)
+          .then(result => {
+            if (!form.isConnected) return;
+            if (client !== detailClient || currentProfile?.id !== profileId) throw new Error("The account changed. Reopen this transaction.");
+            if (result.error) throw result.error;
+            const target = form.querySelector("[data-sale-promotions]");
+            if (result.data.length) {
+              target.innerHTML = result.data.map(group => `<p><strong>Promotion ${escapeHTML(group.barcode)} · ${escapeHTML(group.description)}</strong> · Bundle price: ${formatMoney(Number(group.bundle_total))}</p>`).join("") +
+                (canCorrectBundleSale(currentProfile.role)
+                  ? "<p>Bundle item prices below are allocated for reporting. Use Edit to correct this transaction.</p>"
+                  : "<p>Bundle item prices below are allocated for reporting. Ask your manager to correct this transaction.</p>");
+              const edit = form.querySelector("[data-edit-sale]");
+              if (edit && canCorrectBundleSale(currentProfile.role)) edit.disabled = false;
+            } else {
+              target.textContent = "";
+              actions.forEach(button => { button.disabled = false; });
+            }
+          }).catch(error => {
+            if (!form.isConnected) return;
+            console.error("Unable to load transaction promotions.", error);
+            form.querySelector("[data-sale-promotions]").textContent = `Unable to verify promotion details: ${friendlyError(error)}. Editing is unavailable until this is resolved.`;
+          });
+      } });
+  }
+
+  function bindSaleDetailRows(root, returnToHistory) {
+    const open = event => {
+      const row = event.target.closest("[data-sale-details]");
+      if (!row || (event.type === "keydown" && !["Enter", " "].includes(event.key))) return;
+      event.preventDefault();
+      try { openSaleDetails(row.dataset.saleDetails, returnToHistory); }
+      catch (error) { alert(error.message); }
+    };
+    root.addEventListener("click", open);
+    root.addEventListener("keydown", open);
+  }
+
+  function brandProgressChart(scope) {
+    const brand = String(currentProfile.assigned_brand || "").trim();
+    const title = `${brand || "Brand"} sales · your branch contribution`;
+    if (liveData.brandContributionError) return panel(title, scope,
+      `<p class="connected-error">${escapeHTML(liveData.brandContributionError)}</p>`);
+    const srp = ui.salesBasis === "srp";
+    const rows = liveData.brandContribution.filter(row => inStatus(row.sold_on));
+    const sum = key => rows.reduce((total, row) => total + Number(row[key] || 0), 0);
+    const own = sum(srp ? "own_srp" : "own_price");
+    const total = sum(srp ? "branch_srp" : "branch_price");
+    const other = Math.max(0, total - own);
+    const controls = "";
+    const missing = srp ? sum("missing_srp") : 0;
+    const footer = `<ul class="pie-legend contribution-legend">
+      <li><i style="background:#355ee8"></i><span>Sold by you</span><strong>${percent(own, total, 2)}</strong></li>
+      <li><i style="background:#16a34a"></i><span>Sold by other PS</span><strong>${percent(other, total, 2)}</strong></li>
+      </ul><p class="an-note">Your assigned-brand sales divided by all sales of that brand in your branch. Branch-wide amounts are hidden.${missing ? ` Mixed basis: ${missing} unit(s) have no recorded SRP and use selling price instead.` : ""}</p>`;
+    return pieChart(title, `${scope} · ${srp ? "SRP" : "Price"} × quantity`, [
+      { label: "Sold by you", value: own, color: "#355ee8" },
+      { label: "Sold by other PS", value: other, color: "#16a34a" },
+    ], {
+      controls, footer, amounts: false, legend: false, names: true, tableKey: "brandlog",
+      exportRows: [[title, `${scope} · ${srp ? "SRP" : "Price"} × quantity`], ["Seller", "Amount", "Share (%)"],
+        ["Sold by you", own, total ? own / total * 100 : 0], ["Sold by other PS", "Hidden", total ? other / total * 100 : 0],
+        ...(srp ? [["Units without recorded SRP", missing, "Selling-price fallback"]] : [])],
+    });
+  }
+
+  function brandLogPanel() {
+    const brand = currentProfile.assigned_brand || "your brand";
+    if (liveData.brandSalesError) return panel(`${brand} sales log · branch-wide`, "Sales details could not be loaded.",
+      `<p class="an-note" role="alert">${escapeHTML(liveData.brandSalesError)} Reload the workspace to retry. The contribution chart is loaded separately.</p>`, "", "brandlog");
+    const rows = liveData.brandSales
+      .filter(row => inPeriod(row.sold_on))
+      .sort((a, b) => String(b.sold_on).localeCompare(String(a.sold_on)) || natural(a.ps_name, b.ps_name));
+    return panel(`${brand} sales log · branch-wide`, `${rows.length} line${rows.length === 1 ? "" : "s"} sold by everyone in your branch for your brand, newest first.`, tableBlock(
+      "brandlog",
+      ["Sale date", "Invoice", "Product Specialist", "Brand", "Category", "Sub-category", "Product", "Qty"],
+      rows,
+      row => `<tr class="sale-summary-row" data-brand-sale="${escapeHTML(row.line_id)}" tabindex="0" aria-label="View invoice ${escapeHTML(row.invoice_number)}"><td>${escapeHTML(row.sold_on)}</td><td><strong>${escapeHTML(row.invoice_number)}</strong></td><td>${escapeHTML(row.ps_name)}</td><td>${escapeHTML(row.brand)}</td><td>${escapeHTML(row.category || "—")}</td><td>${escapeHTML(row.sub_category || "—")}</td><td>${escapeHTML(row.model_description)}</td><td>${escapeHTML(row.quantity)}</td></tr>`,
+      "No sales of your brand match this period.",
+    ));
+  }
+
+  function openBrandSale(lineId) {
+    if (currentProfile.role !== "ps") return;
+    const selected = liveData.brandSales.find(row => row.line_id === lineId && inPeriod(row.sold_on));
+    if (!selected) return;
+    const own = liveData.sales.find(sale => sale.ps_id === currentProfile.id &&
+      linesForSale(sale.id).some(line => line.id === lineId));
+    if (own) return openSaleDetails(own.id);
+    const items = liveData.brandSales.filter(row => row.invoice_number === selected.invoice_number &&
+      row.branch_id === selected.branch_id && row.sold_on === selected.sold_on && row.ps_id === selected.ps_id);
+    openModal({ title: `Transaction · ${selected.invoice_number}`, readOnly: true, wide: true,
+      headerAction: exportButton("data-transaction-export", "Download transaction"),
+      intro: `${selected.sold_on} · ${selected.ps_name} · ${branchName(selected.branch_id)}. Products available in your assigned-brand sales log.`,
+      body: `<div class="connected-table-wrap"><table class="connected-table"><thead><tr><th>Barcode</th><th>Brand</th><th>Product</th><th>Qty</th></tr></thead><tbody>${items.map(row =>
+        `<tr><td>${escapeHTML(row.barcode || "—")}</td><td>${escapeHTML(row.brand)}</td><td>${escapeHTML(row.model_description)}</td><td>${escapeHTML(row.quantity)}</td></tr>`).join("")}</tbody></table></div>`,
+      onReady: form => {
+        const download = form.closest(".dlg").querySelector("[data-transaction-export]");
+        download.addEventListener("click", () => chooseExportFormat(download, format =>
+          exportWorkbook([tableElementSheet(form.querySelector("table"), "Transaction " + selected.invoice_number)],
+            "branchline-invoice-" + selected.invoice_number.replace(/[^a-z0-9_-]/gi, "-"), false, format)));
+      },
+    });
+  }
+
+  function inventoryStockFor(branch, barcode) {
+    if (!inventoryStockFor.index || inventoryStockFor.source !== liveData.inventoryStock) {
+      inventoryStockFor.source = liveData.inventoryStock;
+      inventoryStockFor.index = new Map((liveData.inventoryStock || []).map(item => [`${item.branch_id}\0${item.barcode}`, item]));
+    }
+    return inventoryStockFor.index.get(`${branch}\0${barcode}`);
+  }
+
+  function inventoryUnitsFor(branch, barcode, saleId) {
+    if (!inventoryUnitsFor.index || inventoryUnitsFor.source !== liveData.inventorySerials) {
+      inventoryUnitsFor.source = liveData.inventorySerials;
+      inventoryUnitsFor.index = new Map();
+      for (const item of liveData.inventorySerials || []) {
+        const key = `${item.branch_id}\0${item.barcode}`;
+        if (!inventoryUnitsFor.index.has(key)) inventoryUnitsFor.index.set(key,[]);
+        inventoryUnitsFor.index.get(key).push(item);
+      }
+    }
+    const owned = new Set(saleId ? serialsFor(saleId, barcode) : []);
+    return (inventoryUnitsFor.index.get(`${branch}\0${barcode}`) || []).filter(item => item.status === "available" || owned.has(item.serial));
+  }
+
+  function inventorySaleUnitsFor(branch, barcode, saleId) {
+    const choices = new Map((liveData.inventorySalesSerials || [])
+      .filter(item => item.branch_id === branch && item.barcode === barcode).map(item => [item.serial, item]));
+    for (const item of inventoryUnitsFor(branch, barcode, saleId)) {
+      if (saleId && serialsFor(saleId, barcode).includes(item.serial)) choices.set(item.serial, item);
+    }
+    return [...choices.values()];
+  }
+
+  function inventorySheets() {
+    const catalog = liveData.inventoryCatalog || [];
+    const items = [["Branch", "Barcode", "Product", "Brand", "Category", "Sub-category", "Available qty", "Serialized", "Inventory status"],
+      ...catalog.map(item => {
+        const stock = inventoryStockFor(item.branch_id, item.barcode);
+        return [branchName(item.branch_id), item.barcode, item.model_description, item.brand, item.category || "", item.sub_category || "", stock?.quantity ?? "", stock ? stock.serialized ? "Yes" : "No" : "Unknown", stock ? "Tracked" : "Not initialized"];
+      })];
+    const units = [["Branch", "Barcode", "Serial", "Received date", "Age (days)", "Status"], ...(liveData.inventorySerials || []).map(item =>
+      [branchName(item.branch_id), item.barcode, item.serial, item.received_on || "", window.BranchlineInventory.ageDays(item.received_on, window.BranchlineDemo.philippineDate()) ?? "Unknown", item.status])];
+    const batches = new Map((liveData.inventoryTransferBatches || []).map(batch => [batch.id,batch]));
+    const transfers = [["ID", "Reference", "From", "To", "Barcode", "Qty", "Serials", "Status", "Submitted", "Resolved", "Remarks"],
+      ...(liveData.inventoryTransfers || []).flatMap(item => {
+        if (item.serials.length > Number(item.quantity)) throw new Error(`Transfer ${item.reference || item.id}: too many serial numbers.`);
+        const units = [...item.serials.map(unit => ({ quantity: 1, serial: unit.serial })),
+          ...(Number(item.quantity) > item.serials.length ? [{ quantity: Number(item.quantity) - item.serials.length, serial: "" }] : [])];
+        return units.map(unit => [item.id, item.reference || "Legacy (no reference)", inventoryBranchName(item.from_branch), inventoryBranchName(item.to_branch), item.barcode, unit.quantity, unit.serial, inventoryTransferStatus(batches.get(item.batch_id)?.status || item.status), item.dispatched_at, item.resolved_at || "", item.note]);
+      })];
+    return [{ name: "Item Master", rows: items }, { name: "Inventory serials", rows: units }, { name: "Stock transfers", rows: transfers },
+      { name: "Transfer approvals", rows: [["Reference","From","To","Status","Requested","Requester ID","Approved","Approver ID","Resolved","Resolver ID","Remarks"],
+        ...[...batches.values()].map(batch => [batch.reference,inventoryBranchName(batch.from_branch),inventoryBranchName(batch.to_branch),inventoryTransferStatus(batch.status),batch.requested_at,batch.requested_by,batch.approved_at || "",batch.approved_by || "",batch.resolved_at || "",batch.resolved_by || "",batch.note])] },
+      { name: "Inventory history", rows: [["Date", "Branch", "Action", "Barcode", "Qty change", "Note"], ...(liveData.inventoryEvents || []).map(item => [item.created_at, branchName(item.branch_id), item.kind, item.barcode || "", item.quantity ?? "", inventoryEventNote(item)])] }];
+  }
+
+  function inventoryEventNote(item) {
+    return liveData.inventoryTransferBatches?.find(batch => batch.id === item.note)?.reference ||
+      (["dispatch", "receive", "cancel"].includes(item.kind)
+        ? liveData.inventoryTransfers?.find(transfer => transfer.id === item.note)?.reference : null) || item.note;
+  }
+
+  function inventoryTransferStatus(status) {
+    return {pending_approval:"Awaiting source BM approval",transit:"In transit",received:"Received",
+      rejected_source:"Rejected by source BM",rejected_destination:"Rejected by destination",cancelled:"Cancelled"}[status] || status;
+  }
+
+  function inventoryBranchName(id) {
+    return liveData.branches.find(item => item.id === id)?.name ||
+      liveData.inventoryDestinations?.find(item => item.id === id)?.name || "Other company branch";
+  }
+
+  function inventoryVisibleProducts() {
+    const ids = scopeBranchIds();
+    const brandMatches = ["brand", "aging"].includes(ui.invView) && currentProfile.role === "ps"
+      ? window.BranchlineInventory.brandMatcher(currentProfile, liveData.profiles, liveData.inventoryCatalog) : null;
+    const query = searchQuery();
+    return (liveData.inventoryCatalog || []).filter(item => ids.has(item.branch_id) &&
+      (!brandMatches || brandMatches(item)) &&
+      (!(ui.invAvailable && ["master", "brand"].includes(ui.invView)) || inventoryStockFor(item.branch_id, item.barcode)?.quantity > 0) &&
+      (!ui.invBrand || item.brand === ui.invBrand) && matches(query, item.barcode, item.model_description, item.brand, item.category, item.sub_category));
+  }
+
+  function renderInventoryPage() {
+    const tabScroll = connectedContent.querySelector(".inventory-tabs")?.scrollLeft ?? ui.invTabScroll ?? 0;
+    ui.invTabScroll = tabScroll;
+    ui.invView ||= currentProfile.role === "ps" ? "brand" : "master";
+    if (liveData.inventoryError) return mountPage(pageHeading("Inventory", "Store stock availability"), "", "", () => `<p class="connected-error">${escapeHTML(liveData.inventoryError)}</p>`);
+    const visibleIds = scopeBranchIds();
+    const scopeKey = [...visibleIds].sort().join("\0");
+    if (currentProfile.role === "admin" && (renderInventoryPage.catalog !== liveData.inventoryCatalog || renderInventoryPage.scope !== scopeKey)) {
+      renderInventoryPage.catalog = liveData.inventoryCatalog;
+      renderInventoryPage.scope = scopeKey;
+      renderInventoryPage.pending = (liveData.inventoryCatalog || []).filter(item => visibleIds.has(item.branch_id) &&
+        window.BranchlineInventory.needsClassification(item)).length;
+    }
+    const pendingClassification = currentProfile.role === "admin" ? renderInventoryPage.pending : 0;
+    const views = [["master", "Item Master"], ["brand", currentProfile.role === "ps" ? "My Brand Inventory" : "Brand Inventory"], ["aging", "Aging stock"], ["transfers", "Transfer history"], ["history", "Inventory history"],
+      ...(currentProfile.role === "admin" ? [["classification", `Needs classification (${pendingClassification})`]] : []),
+      ...(!inventoryOnly() && managesInventory() ? [["missing", "Missing SRP"]] : []),
+      ...(managesInventory() ? [["transfer", "Transfer stock"]] : [])];
+    if (!views.some(([key]) => key === ui.invView)) ui.invView = "master";
+    const isForm = ["import", "transfer"].includes(ui.invView);
+    if (ui.invView === "missing" && !ui.sort["inventory-missing"]) ui.sort["inventory-missing"] = { col: 3, dir: "asc" };
+    const tabs = `<nav class="inventory-tabs" aria-label="Inventory sections">${views.map(([key, label]) =>
+      `<button class="inventory-tab${ui.invView === key ? " is-active" : ""}" type="button" data-inventory-tab="${key}" aria-current="${ui.invView === key ? "page" : "false"}">${escapeHTML(label)}</button>`).join("")}</nav>`;
+    mountPage(pageHeading("Inventory", "Live availability since the latest imported snapshot. Reports reset stock, never the sales log."),
+      tabs, isForm ? "" : filterBar({ district: true, branch: true, search: ui.invView === "master" ? "Enter barcode or item name to show stock" : "Barcode, product, brand or category",
+        actions: inventoryOnly() ? exportButton("data-export-all", "Export all tables") : "" }),
+      () => {
+        if (isForm) return "";
+        if (ui.invView === "master" && !searchQuery().trim()) return panel("Item Master",
+          "Search by barcode or item name to see product details and quantities in your accessible branches.",
+          '<div class="empty-state">Enter a barcode or item name above to show inventory.</div>');
+        const ids = scopeBranchIds();
+        const snapshots = liveData.inventorySnapshots.filter(item => ids.has(item.branch_id));
+        const today = window.BranchlineDemo.philippineDate();
+        const dates = `<p class="an-note">${liveData.branches.filter(branch => ids.has(branch.id)).map(branch => {
+          const latest = snapshots.find(item => item.branch_id === branch.id);
+          return `${escapeHTML(branch.name)}: ${latest ? `report ${escapeHTML(new Date(latest.reported_at).toLocaleString("en-PH"))}${latest.reported_at.slice(0, 10) < today ? " — check snapshot freshness" : ""}` : "inventory not initialized"}`;
+        }).join("<br>")}</p>`;
+        if (ui.invView === "transfers") {
+          return inventoryBatchHistory(ids) + dates;
+        }
+        if (ui.invView === "history") return panel("Inventory history", "Imports, adjustments and transfers are recorded with the acting account.", tableBlock("inventory-history",
+          ["When", "Branch", "Action", "Barcode", "Qty change", "Note"], liveData.inventoryEvents.filter(item => ids.has(item.branch_id) &&
+            matches(searchQuery(), item.barcode, item.kind, inventoryEventNote(item), branchName(item.branch_id)))
+            .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)) || natural(b.id, a.id)),
+          item => `<tr><td>${escapeHTML(item.created_at)}</td><td>${escapeHTML(branchName(item.branch_id))}</td><td>${escapeHTML(item.kind)}</td><td>${escapeHTML(item.barcode)}</td><td>${item.quantity ?? ""}</td><td>${escapeHTML(inventoryEventNote(item))}</td></tr>`, "No inventory movements."));
+        const items = inventoryVisibleProducts();
+        if (ui.invView === "brand" || ui.invView === "aging") {
+          const productIndex = new Map(items.map(item => [`${item.branch_id}\0${item.barcode}`, item]));
+          const units = liveData.inventorySerials.filter(item => item.status === "available" && productIndex.has(`${item.branch_id}\0${item.barcode}`));
+          const ageBands = [["current", "Current", 0, 30], ["30", "30 days", 30, 60], ["60", "60 days", 60, 90], ["90", "90 days", 90, Infinity]];
+          const band = ageBands.find(([key]) => key === (ui.invAge || "90"));
+          const rows = ui.invView === "aging" ? units.filter(item => {
+            const age = window.BranchlineInventory.ageDays(item.received_on, today);
+            return age !== null && age >= band[2] && age < band[3];
+          }) : units;
+          const ageFilter = ui.invView === "aging" ? `<label class="field an-inline"><span>Aging range</span><select data-filter="invAge">${ageBands.map(([key,label]) =>
+            `<option value="${key}" ${key === band[0] ? "selected" : ""}>${label}</option>`).join("")}</select></label>` : "";
+          const table = panel(ui.invView === "aging" ? "Stock aging" : "Available serials",
+            `${ui.invView === "aging" ? "Current: under 30 days; 30 days: 30–59; 60 days: 60–89; 90 days: 90 or more. Unknown receipt dates are excluded. " : ""}Serial identity is branch + barcode + serial. Original receipt dates survive branch transfers.`, tableBlock("inventory-serials",
+            ["Branch", "Barcode", "Product", "Serial", "Received", "Age (days)"], rows,
+            item => `<tr><td>${escapeHTML(branchName(item.branch_id))}</td><td>${escapeHTML(item.barcode)}</td><td>${escapeHTML(productIndex.get(`${item.branch_id}\0${item.barcode}`)?.model_description)}</td><td>${escapeHTML(item.serial)}</td><td>${escapeHTML(item.received_on || "Unknown")}</td><td>${window.BranchlineInventory.ageDays(item.received_on, today) ?? "Unknown"}</td></tr>`, "No matching available serials.", PAGE_SIZE,
+            (item,col) => [branchName(item.branch_id),item.barcode,productIndex.get(`${item.branch_id}\0${item.barcode}`)?.model_description,
+              item.serial,item.received_on || "Unknown",window.BranchlineInventory.ageDays(item.received_on,today) ?? "Unknown"][col]), ageFilter);
+          if (ui.invView === "aging") return dates + table;
+          return dates + inventoryMasterTable(items, "inventory-brand", "Brand inventory") + table;
+        }
+        if (ui.invView === "classification" && currentProfile.role === "admin") {
+          const pending = items.filter(item => window.BranchlineInventory.needsClassification(item));
+          return dates + panel("Needs classification",
+            "Complete Brand and Category after importing. Subcategory is optional. Admin only; these shared catalog details also update matching historical product classifications, never prices or quantities.",
+            tableBlock("inventory-classification", ["Branch", "Barcode", "Product", "Brand", "Category", "Subcategory", ""], pending,
+              item => `<tr><td>${escapeHTML(branchName(item.branch_id))}</td><td>${escapeHTML(item.barcode)}</td><td>${escapeHTML(item.model_description)}</td><td>${escapeHTML(item.brand || "Unclassified")}</td><td>${escapeHTML(item.category || "Missing")}</td><td>${escapeHTML(item.sub_category || "")}</td><td><button type="button" class="button button-outline button-small" data-inventory-classify="${escapeHTML(item.barcode)}" data-branch="${escapeHTML(item.branch_id)}">Classify</button></td></tr>`,
+              "All matching products have a brand and category. Subcategory is optional."));
+        }
+        const displayed = ui.invView === "missing" ? items.filter(item => item.missing_srp) : items;
+        if (ui.invView === "missing") return dates + inventoryMasterTable(displayed, "inventory-missing", "Missing SRP");
+        if (!searchQuery().trim()) return panel("Item Master", "Search by barcode or item name to see product details and quantities in your accessible branches.",
+          '<div class="empty-state">Enter a barcode or item name above to show inventory.</div>');
+        const uninitialized = items.filter(item => !inventoryStockFor(item.branch_id, item.barcode)).length;
+        const available = items.reduce((sum, item) => sum + (inventoryStockFor(item.branch_id, item.barcode)?.quantity || 0), 0);
+        const total = uninitialized === items.length && uninitialized ? "Not initialized" : available;
+        return dates + inventoryMasterTable(displayed) + `<p class="inventory-total" role="status"><strong>Total available quantity: ${escapeHTML(total)}</strong>${uninitialized ? ` <span>${uninitialized} matching branch/item record(s) have unknown stock; total covers initialized stock only.</span>` : ""}</p>`;
+      });
+    if (!collectingExports && !capturingPieResults) {
+      const strip = connectedContent.querySelector(".inventory-tabs");
+      if (strip) {
+        strip.scrollLeft = tabScroll;
+        strip.onscroll = () => { ui.invTabScroll = strip.scrollLeft; };
+      }
+    }
+    if (!collectingExports && !capturingPieResults && isForm) {
+      if (ui.invView === "import") openInventoryImport(true);
+      else openInventoryTransfer(true);
+    }
+  }
+
+  function inventoryMasterTable(items, key = "inventory-master", title = "Item Master") {
+    const toggle = ["inventory-master", "inventory-brand"].includes(key) ? `<div class="inventory-availability" role="group" aria-label="Stock availability">
+      <button class="button button-small ${ui.invAvailable ? "button-outline" : "button-primary"}" type="button" data-inventory-available="all" aria-pressed="${!ui.invAvailable}">All products</button>
+      <button class="button button-small ${ui.invAvailable ? "button-primary" : "button-outline"}" type="button" data-inventory-available="available" aria-pressed="${!!ui.invAvailable}">Available only</button></div>` : "";
+    return panel(title, `All products includes zero and uninitialized stock; Available only shows quantity above zero. Uninitialized stock is unknown, not zero.${inventoryOnly() ? "" : " Edit product prices using Products → Edit (BM and above)."}`, tableBlock(key,
+      ["Branch", "Barcode", "Product", "Brand", "Category", "Subcategory", "Available qty", "Serialized", ""], items,
+      item => {
+        const stock = inventoryStockFor(item.branch_id, item.barcode);
+        const serialData = `data-inventory-serials="${escapeHTML(item.barcode)}" data-branch="${escapeHTML(item.branch_id)}"`;
+        return `<tr${stock?.serialized ? ` class="inventory-serialized-row" ${serialData}` : ""}><td>${escapeHTML(branchName(item.branch_id))}</td><td>${escapeHTML(item.barcode)}</td><td>${escapeHTML(item.model_description)}${item.missing_srp ? '<br><span class="an-down">SRP needed — Products → Edit</span>' : ""}</td><td>${escapeHTML(item.brand)}</td><td>${escapeHTML(item.category || "Needs classification")}</td><td>${escapeHTML(item.sub_category || "")}</td><td>${stock ? stock.quantity : "Not initialized"}</td><td>${stock ? stock.serialized ? `<button type="button" class="inventory-serial-trigger" ${serialData} aria-haspopup="dialog" aria-label="View available serial numbers for ${escapeHTML(item.model_description)}">Yes</button>` : "No" : "Unknown"}</td><td>${currentProfile.role === "admin" ? `<button class="button button-outline button-small" type="button" data-inventory-classify="${escapeHTML(item.barcode)}" data-branch="${escapeHTML(item.branch_id)}">Classify</button> ` : ""}${managesInventory() && stock ? `<button class="button button-outline button-small" data-inventory-adjust="${escapeHTML(item.barcode)}" data-branch="${escapeHTML(item.branch_id)}">Adjust</button>` : ""}</td></tr>`;
+      }, "No products match this selection.", PAGE_SIZE, (item,col) => {
+        const stock = col >= 6 ? inventoryStockFor(item.branch_id,item.barcode) : null;
+        return [branchName(item.branch_id),item.barcode,
+          `${item.model_description}${item.missing_srp ? "SRP needed — Products → Edit" : ""}`,
+          item.brand,item.category || "Needs classification",item.sub_category || "",
+          stock ? stock.quantity : "Not initialized",stock ? stock.serialized ? "Yes" : "No" : "Unknown"][col];
+      }), toggle);
+  }
+
+  function inventorySerialDetails(trigger) {
+    const { branch, inventorySerials: barcode } = trigger.dataset;
+    if (!scopeBranchIds().has(branch) || !inventoryStockFor(branch, barcode)?.serialized) return null;
+    const product = liveData.inventoryCatalog.find(item => item.branch_id === branch && item.barcode === barcode);
+    if (!product) return null;
+    const units = inventoryUnitsFor(branch, barcode);
+    return `<dl class="inventory-item-details"><div><dt>Branch</dt><dd>${escapeHTML(branchName(branch))}</dd></div>
+      <div><dt>Barcode</dt><dd class="inventory-exact">${escapeHTML(barcode)}</dd></div>
+      <div><dt>Product</dt><dd>${escapeHTML(product.model_description)}</dd></div>
+      <div><dt>Brand</dt><dd>${escapeHTML(product.brand)}</dd></div>
+      <div><dt>Category</dt><dd>${escapeHTML(product.category || "Needs classification")}</dd></div>
+      <div><dt>Subcategory</dt><dd>${escapeHTML(product.sub_category || "None")}</dd></div>
+      <div><dt>Available quantity</dt><dd>${inventoryStockFor(branch, barcode).quantity}</dd></div></dl>
+      <h3>Available serial numbers (${units.length})</h3>${units.length
+        ? `<ul class="inventory-serial-list">${units.map(unit => `<li class="inventory-exact">${escapeHTML(unit.serial)}</li>`).join("")}</ul>`
+        : '<p class="an-note">No available serial numbers for this item.</p>'}`;
+  }
+
+  function openInventorySerials(trigger) {
+    if (modalRoot || workspaceWrites) return;
+    const body = inventorySerialDetails(trigger);
+    if (!body) return;
+    hideInventorySerialTip();
+    openModal({ title: "Item information & available serials", body, readOnly: true });
+    inventorySerialReturn = trigger.matches("button") ? trigger : trigger.querySelector(".inventory-serial-trigger");
+  }
+
+  function openInventoryClassification(barcode, branch) {
+    if (currentProfile.role !== "admin") throw new Error("Only an administrator can classify inventory products.");
+    const product = liveData.inventoryCatalog.find(item => item.branch_id === branch && item.barcode === barcode);
+    if (!product) throw new Error("This product is no longer in your inventory catalog. Reload and try again.");
+    const catalog = liveData.inventoryCatalog;
+    const suggestions = (id, values) => `<datalist id="${id}">${uniqueSorted(values).map(value => `<option value="${escapeHTML(value)}"></option>`).join("")}</datalist>`;
+    openModal({
+      title: `Classify product · ${barcode}`, submitLabel: "Save classification",
+      intro: `${product.model_description}. Changes apply to this barcode across your company's catalog and historical product classifications. Stock, serials and recorded prices remain unchanged.`,
+      body: `${fieldHTML("Brand", "brand", `<input name="brand" required list="inventory-class-brands" value="${escapeHTML(product.brand?.toLowerCase() === "unclassified" ? "" : product.brand || "")}" autocomplete="off">`)}
+        ${fieldHTML("Category", "category", `<input name="category" required list="inventory-class-categories" value="${escapeHTML(product.category || "")}" autocomplete="off">`)}
+        ${fieldHTML("Subcategory (optional)", "sub_category", `<input name="sub_category" list="inventory-class-subs" value="${escapeHTML(product.sub_category || "")}" autocomplete="off">`)}
+        ${suggestions("inventory-class-brands", catalog.map(item => item.brand).filter(brand => brand?.toLowerCase() !== "unclassified"))}
+        ${suggestions("inventory-class-categories", catalog.map(item => item.category))}
+        ${suggestions("inventory-class-subs", catalog.map(item => item.sub_category))}`,
+      onSubmit: async form => {
+        const brand = uppercaseEntry(form.elements.brand.value), category = uppercaseEntry(form.elements.category.value);
+        if (window.BranchlineInventory.needsClassification({ brand, category })) throw new Error("Enter a confirmed brand and category. Subcategory is optional.");
+        mustRpc(await client.rpc("classify_inventory_product", { p_branch: branch, p_barcode: barcode,
+          p_brand: brand, p_category: category, p_sub_category: uppercaseEntry(form.elements.sub_category.value) || null }));
+        await refreshData();
+      },
+    });
+  }
+
+  async function showInventoryReminder() {
+    if (liveData.inventoryError || !liveData.inventoryStock?.length) return;
+    const key = `${demoStore ? "demo" : "live"}:${currentProfile.id}:${window.BranchlineDemo.philippineDate()}`;
+    if (inventoryReminderChecked === key) return;
+    inventoryReminderChecked = key;
+    const reminderClient = client, reminderProfile = currentProfile.id;
+    const result = await reminderClient.rpc("claim_inventory_reminder");
+    if (client !== reminderClient || currentProfile?.id !== reminderProfile) return;
+    if (result.error) {
+      console.error("Unable to claim inventory reminder.", result.error);
+      connectedContent.insertAdjacentHTML("afterbegin", '<p class="connected-error">Inventory reminder could not load. Reload to retry.</p>');
+      inventoryReminderChecked = "";
+      return;
+    }
+    if (!result.data) return;
+    const today = window.BranchlineDemo.philippineDate();
+    const matchesBrand = currentProfile.role === "ps"
+      ? window.BranchlineInventory.brandMatcher(currentProfile, liveData.profiles, liveData.inventoryCatalog) : null;
+    const assignedProducts = matchesBrand ? new Set(liveData.inventoryCatalog.filter(matchesBrand)
+      .map(item => `${item.branch_id}\0${item.barcode}`)) : null;
+    const aged = liveData.inventorySerials.filter(unit => unit.status === "available" && window.BranchlineInventory.ageDays(unit.received_on, today) >= 90 &&
+      (!assignedProducts || assignedProducts.has(`${unit.branch_id}\0${unit.barcode}`)));
+    const missing = !inventoryOnly() && managesInventory() ? liveData.inventoryCatalog.filter(item => item.missing_srp).length : 0;
+    if (aged.length || missing) connectedContent.insertAdjacentHTML("afterbegin", `<aside class="inventory-reminder" role="status"><strong>Inventory reminder</strong><p>${aged.length} available serialized unit(s) are 90 days old or more.${missing ? ` ${missing} branch/catalog item(s) need SRP — use Products → Edit.` : ""}</p><button class="button button-small" data-inventory-aging>View aging inventory</button><button class="button button-small" data-inventory-dismiss>Dismiss</button></aside>`);
+  }
+
+  function inventoryBranchField(name, label, selected) {
+    return fieldHTML(label, name, selectHTML(name, liveData.branches.map(item => [item.id, item.name]), selected || ui.branch || liveData.branches[0]?.id));
+  }
+
+  function openLegacyImportCenter() {
+    if (workspaceWrites) { alert("Please wait for the current save to finish before importing."); return; }
+    const routes = [
+      ...(currentProfile?.role === "admin" ? [
+        ["products", "Product catalog", "Excel / CSV catalog details and SRP.", openImportModal],
+        ["sales-history", "Sales History", "Historical invoices and item-level sales.", openSalesHistoryModal],
+        ["daily-history", "Daily Monitoring", "Monthly workbooks with branch daily totals and walk-ins.", openDailyHistoryModal],
+      ] : []),
+      ...(managesInventory() ? [
+        ["inventory", "Branch inventory", "Paired quantity and serialized reports. Replaces the selected branch's stock snapshot.", () => openInventoryImport()],
+      ] : []),
+    ];
+    if (!routes.length) { alert("You do not have permission to import these files."); return; }
+    openModal({
+      title: "Existing import tools",
+      intro: "Choose a data type, then use its existing file checks and confirmation. Extractor consolidated workbooks are not supported yet.",
+      body: routes.map(([id, label, description]) =>
+        `<div class="field"><button class="button button-outline" type="button" data-import-route="${id}">${escapeHTML(label)}</button><span>${escapeHTML(description)}</span></div>`).join(""),
+      readOnly: true,
+      onReady: form => form.addEventListener("click", event => {
+        const id = event.target.closest("[data-import-route]")?.dataset.importRoute;
+        if (!id) return;
+        if (workspaceWrites) { alert("Please wait for the current save to finish before importing."); return; }
+        const route = routes.find(([key]) => key === id);
+        if (!route || !(id === "inventory" ? managesInventory() : currentProfile?.role === "admin")) {
+          alert("You do not have permission to use this import route."); return;
+        }
+        try {
+          closeModal();
+          route[3]();
+        } catch (error) {
+          console.error("Unable to open import route.", error);
+          alert(friendlyError(error));
+        }
+      }),
+    });
+  }
+
+  async function openImportCenter() {
+    if (workspaceWrites) { alert("Please wait for the current save to finish before importing."); return; }
+    if (!managesInventory()) { alert("You do not have permission to import these files."); return; }
+    const profileId = currentProfile.id, importClient = client;
+    try {
+      const { openUnifiedImporter } = await import("./unified-import-ui.mjs");
+      if (currentProfile?.id !== profileId || client !== importClient) throw new Error("The active account changed. Open the importer again.");
+      const admin = currentProfile.role === "admin";
+      openUnifiedImporter({
+        openModal, escapeHTML, branches: liveData.branches, admin, demo: !!demoStore,
+        knownProducts: liveData.products || [], knownStock: liveData.inventoryStock || [],
+        today: window.BranchlineDemo.philippineDate(), XLSX: window.XLSX,
+        apis: { sales: window.BranchlineSalesHistory, daily: window.BranchlineDailyHistory, inventory: window.BranchlineInventory },
+        openLegacy: openLegacyImportCenter, confirm: message => window.confirm(message),
+        uuid: () => crypto.randomUUID(), refresh: refreshData,
+        checkPermission: operations => {
+          if (currentProfile?.id !== profileId || client !== importClient || !managesInventory() ||
+              (operations.some(operation => operation !== "inventory") && currentProfile.role !== "admin")) {
+            throw new Error("The active account no longer has permission for this import.");
+          }
+
+        },
+        rpc: (name, params) => {
+          if (currentProfile?.id !== profileId || client !== importClient || !managesInventory() ||
+              (!["unified_import_capabilities", "import_unified_inventory"].includes(name) && currentProfile.role !== "admin")) {
+            throw new Error("The active account changed or no longer has permission. No further steps were started.");
+          }
+          return importClient.rpc(name, {
+          ...params,
+          ...(params.p_items ? { p_items: params.p_items.map(item => ({ ...item,
+            brand: uppercaseEntry(item.brand), description: uppercaseEntry(item.description),
+            category: uppercaseEntry(item.category), sub_category: uppercaseEntry(item.sub_category) })) } : {}),
+          ...(params.p_sales ? { p_sales: params.p_sales.map(sale => ({ ...sale, customer: uppercaseEntry(sale.customer), ps_name: uppercaseEntry(sale.ps_name),
+            lines: sale.lines.map(line => ({ ...line, description: uppercaseEntry(line.description), brand: uppercaseEntry(line.brand),
+              category: uppercaseEntry(line.category), sub_category: uppercaseEntry(line.sub_category) })) })) } : {}),
+          ...(params.p_label ? { p_label: uppercaseEntry(params.p_label) } : {}),
+          });
+        },
+      });
+    } catch (error) {
+      console.error("Unable to open unified importer.", error);
+      alert(friendlyError(error));
+    }
+  }
+
+  async function openPromotionReviewModal() {
+    if (demoStore || !["manager", "district_manager", "admin"].includes(currentProfile?.role)) {
+      throw new Error("Promotion review requires a signed-in manager, district manager or administrator.");
+    }
+    const reviewClient = client, profileId = currentProfile.id;
+    const { openPromotionReview } = await import("./promotion-review-ui.mjs");
+    if (client !== reviewClient || currentProfile?.id !== profileId) throw new Error("The account changed. Reopen promotion review.");
+    openPromotionReview({
+      openModal, escapeHTML, branches: liveData.branches, companyImport: currentProfile.role === "admin", confirm: message => window.confirm(message),
+      listPromotions: async branch => {
+        if (client !== reviewClient || currentProfile?.id !== profileId) throw new Error("The account changed. Reopen promotion review.");
+        const result = await fetchAllFrom(reviewClient, "reviewed_promotions", "id,barcode,description,source_name,source_page", [["reviewed_at", false], ["id", true]],
+          query => query.eq("branch_id", branch).is("revoked_at", null));
+        if (result.error) throw result.error;
+        if (client !== reviewClient || currentProfile?.id !== profileId) throw new Error("The account changed. Reopen promotion review.");
+        return result.data;
+      },
+      listProducts: async branch => {
+        if (client !== reviewClient || currentProfile?.id !== profileId) throw new Error("The account changed. Reopen promotion import.");
+        const result = await fetchAllFrom(reviewClient, "products", "barcode,srp,brand,model_description", [["barcode", true]],
+          query => query.eq("branch_id", branch).eq("active", true));
+        if (result.error) throw result.error;
+        if (client !== reviewClient || currentProfile?.id !== profileId) throw new Error("The account changed. Reopen promotion import.");
+        return result.data;
+      },
+      findProducts: async (branch, excerpt) => {
+        if (client !== reviewClient || currentProfile?.id !== profileId) throw new Error("The account changed. Reopen promotion review.");
+        const tokens = [...new Set((excerpt.toUpperCase().match(/\b(?=[A-Z0-9/-]*[A-Z])(?=[A-Z0-9/-]*\d)[A-Z0-9]+(?:[-/][A-Z0-9]+)*\b/g) || [])
+          .filter(token => token.length >= 4 && !/^(?:BUY|GET|\d+MOS)/.test(token)))];
+        if (!tokens.length) return [];
+        const result = await fetchAllFrom(reviewClient, "products", "barcode,brand,model_description", [["barcode", true]],
+          query => query.eq("branch_id", branch).eq("active", true));
+        if (result.error) throw result.error;
+        if (client !== reviewClient || currentProfile?.id !== profileId) throw new Error("The account changed. Reopen promotion review.");
+        return result.data.filter(product => {
+          const text = String(product.model_description || "").toUpperCase();
+          return tokens.some(token => text.split(/[^A-Z0-9/-]+/).includes(token));
+        }).slice(0, 20);
+      },
+      rpc: async (name, args) => {
+        if (client !== reviewClient || currentProfile?.id !== profileId ||
+          !["manager", "district_manager", "admin"].includes(currentProfile?.role)) {
+          throw new Error("The account changed. Reopen promotion review.");
+        }
+        const { data, error } = await reviewClient.rpc(name, args);
+        if (error) throw error;
+        return data;
+      },
+    });
+  }
+
+  function openInventoryImport(inline = false) {
+    let preview = null;
+    openModal({
+      inline,
+      title: "Import branch inventory", wide: true, submitLabel: "Replace branch stock",
+      intro: "Choose both original reports—do not combine them. This replaces stock at confirmation, preserves all sales, and deducts only subsequent sales. Resolve in-transit transfers first.",
+      body: `${inventoryBranchField("branch", "Branch")}${fieldHTML("Stock quantities report", "stock", '<input name="stock" type="file" accept=".xlsx,.xls" required>')}
+        ${fieldHTML("Serialized items report", "serials", '<input name="serials" type="file" accept=".xlsx,.xls" required>')}
+        ${fieldHTML("Report date/time (Philippine time)", "reported", `<input name="reported" type="datetime-local" required value="${new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date()).replace(" ", "T")}">`)}
+        <button class="button button-outline" type="button" data-inventory-preview>Preview and validate</button><div data-inventory-preview-result></div>
+        <label class="check-row"><input name="complete" type="checkbox" required> These are complete reports for the selected branch; absent catalog items should have zero stock. I checked that they reflect current availability.</label>`,
+      onReady: form => {
+        form.addEventListener("change", event => {
+          if (!["branch", "stock", "serials", "reported"].includes(event.target.name)) return;
+          preview = null;
+          form.querySelector("[data-inventory-preview-result]").textContent = "Files or branch changed. Preview again before saving.";
+        });
+        form.querySelector("[data-inventory-preview]").addEventListener("click", async () => {
+          const result = form.querySelector("[data-inventory-preview-result]");
+          try {
+            if (!window.XLSX) throw new Error("Excel reading is unavailable. Connect and reload.");
+            if (!form.elements.stock.files[0] || !form.elements.serials.files[0]) throw new Error("Select both reports.");
+            const read = async file => {
+              const book = window.XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: false });
+              return window.XLSX.utils.sheet_to_json(book.Sheets[book.SheetNames[0]], { header: 1, raw: true, defval: "" });
+            };
+            const [stock, serials] = await Promise.all([read(form.elements.stock.files[0]), read(form.elements.serials.files[0])]);
+            preview = window.BranchlineInventory.parseReports(stock, serials, liveData.inventoryCatalog.filter(item => item.branch_id === form.elements.branch.value), window.BranchlineDemo.philippineDate());
+            window.BranchlineInventory.assertReportBranch(preview.location, liveData.branches.find(branch => branch.id === form.elements.branch.value));
+            result.innerHTML = `<p><strong>${preview.items.length} products · ${preview.quantity} units</strong> (${preview.serialQuantity} serialized; these are included, not added). Report location: <strong>${escapeHTML(preview.location)}</strong>. Confirm this matches your selected branch. ${preview.newProducts} new catalog items; ${preview.sharedSerials.length} serial value(s) shared across different barcodes.</p>
+              <p>Admin imports apply nonblank Category/Subcategory columns; blanks and non-Admin imports preserve existing classifications. Brand is retained. New products with blank/absent SRP stay in Missing SRP for Admin completion; supplied SRP is used. Existing products with blank/absent SRP become 0, except non-Admin imports leave an Admin-pending SRP untouched.</p>`;
+          } catch (error) { preview = null; result.innerHTML = `<p class="connected-error">${escapeHTML(error.message)}</p>`; }
+        });
+      },
+      onSubmit: async form => {
+        if (!preview) throw new Error("Preview and validate both reports before replacing inventory.");
+        window.BranchlineInventory.assertReportBranch(preview.location, liveData.branches.find(branch => branch.id === form.elements.branch.value));
+        const result = await client.rpc("import_inventory", { p_branch: form.elements.branch.value, p_reported_at: `${form.elements.reported.value}:00+08:00`,
+          p_files: `${form.elements.stock.files[0].name} + ${form.elements.serials.files[0].name}`,
+          p_items: preview.items.map(item => ({ ...item, source_location: preview.location, description: uppercaseEntry(item.description),
+            category: uppercaseEntry(item.category), sub_category: uppercaseEntry(item.sub_category) })) });
+        if (result.error?.code === "57014" || /statement timeout/i.test(result.error?.message || "")) {
+          throw new Error("The inventory import timed out and was rolled back; no changes from this attempt were saved. Ask your administrator to apply the inventory import performance update (20261111000000), then retry both reports.");
+        }
+        mustRpc(result);
+        await refreshData();
+      },
+    });
+  }
+
+  function openInventoryAdjust(barcode, branch) {
+    const stock = inventoryStockFor(branch, barcode);
+    if (!stock) throw new Error("Import stock before adjusting this item.");
+    const units = liveData.inventorySerials.filter(item => item.branch_id === branch && item.barcode === barcode && item.status === "available");
+    openModal({
+      title: `Adjust stock · ${barcode}`, submitLabel: "Save adjustment",
+      intro: "This changes current availability, not past sales. For serialized stock supply the complete available list, one serial | YYYY-MM-DD per line. Leave a date blank only if truly unknown.",
+      body: `${fieldHTML("Available quantity", "quantity", `<input name="quantity" type="number" min="0" step="1" required value="${stock.quantity}">`)}
+        ${stock.serialized ? fieldHTML("Available serials and original received dates", "serials", `<textarea name="serials" rows="8">${escapeHTML(units.map(item => `${item.serial} | ${item.received_on || ""}`).join("\n"))}</textarea>`) : ""}
+        ${fieldHTML("Reason", "reason", '<input name="reason" required maxlength="500">')}`,
+      onSubmit: async form => {
+        const serials = stock.serialized ? form.elements.serials.value.split(/\r?\n/).filter(line => line.trim()).map(line => {
+          const parts = line.split("|").map(part => part.trim());
+          return { serial: parts[0], received_on: parts[1] ? window.BranchlineInventory.day(parts[1]) : null };
+        }) : [];
+        mustRpc(await client.rpc("adjust_inventory", { p_branch: branch, p_barcode: barcode, p_quantity: Number(form.elements.quantity.value), p_serials: serials, p_note: uppercaseEntry(form.elements.reason.value) }));
+        await refreshInventoryData();
+      },
+    });
+  }
+
+  function openInventoryTransfer(inline = false) {
+    const draft = [];
+    let readLine;
+    openModal({
+      inline,
+      title: "Transfer inventory", submitLabel: "Review transfer",
+      intro: "Add one or more items, then review the summary. Submission reserves stock for source BM approval. Only after approval can destination BM, IC or SC accept/reject the whole transfer.",
+      body: `${inventoryBranchField("from", "From branch")}${fieldHTML("To branch", "to", selectHTML("to", liveData.inventoryDestinations.map(item => [item.id, item.name]), ""))}
+        ${fieldHTML("Product (search barcode or product info)", "product", '<input name="product" list="transfer-products" required autocomplete="off" placeholder="Type barcode, product, brand or category"><datalist id="transfer-products"></datalist><input name="barcode" type="hidden">')}
+        <div class="dlg-grid">${fieldHTML("Quantity", "quantity", '<input name="quantity" type="number" min="1" step="1" value="1" required>')}
+        ${fieldHTML("Available stock", "available", '<input name="available" readonly value="Choose a product" aria-live="polite">')}</div>
+        <div data-transfer-serials></div>
+        <button type="button" class="button button-outline" data-transfer-add>+ Add item</button>
+        <div data-transfer-draft></div>
+        ${fieldHTML("Transfer reference (automatic)", "reference", '<input name="reference" readonly aria-describedby="transfer-reference-help"><small id="transfer-reference-help">Preview only. The final unique reference is assigned when stock is dispatched.</small>')}
+        ${fieldHTML("Note / remarks (optional)", "note", '<textarea name="note" rows="3" maxlength="500"></textarea>')}`,
+      onReady: form => {
+        let candidates = [];
+        let choices = new Map();
+        const productLabel = item => [item.barcode, item.model_description, item.brand, item.category, item.sub_category].filter(Boolean).join(" · ");
+        const suggestProducts = () => {
+          const query = form.elements.product.value.trim().toLowerCase();
+          const suggestions = [];
+          for (const item of candidates) {
+            if (!query || item.label.toLowerCase().includes(query)) suggestions.push(`<option value="${escapeHTML(item.label)}"></option>`);
+            if (suggestions.length === 100) break;
+          }
+          form.querySelector("#transfer-products").innerHTML = suggestions.join("");
+        };
+        const serials = (preserve = false) => {
+          const stock = inventoryStockFor(form.elements.from.value, form.elements.barcode.value);
+          const quantity = Number(form.elements.quantity.value);
+          const previous = preserve ? [...form.querySelectorAll("[data-transfer-serial]")].map(input => input.value) : [];
+          form.elements.quantity.max = stock ? String(stock.quantity) : "";
+          form.elements.available.value = stock ? String(stock.quantity) : "Choose a product";
+          form.querySelector("[data-transfer-serials]").innerHTML = stock?.serialized && Number.isInteger(quantity) && quantity > 0 && quantity <= stock.quantity
+            ? Array.from({ length: quantity }, (_,index) => fieldHTML(`Serial number ${index + 1}`, `transfer_serial_${index}`,
+              `<input name="transfer_serial_${index}" data-transfer-serial list="transfer-serial-options" required autocomplete="off" placeholder="Choose or search an available serial" value="${escapeHTML(previous[index] || "")}">`)).join("") +
+              `<datalist id="transfer-serial-options">${inventoryUnitsFor(form.elements.from.value, form.elements.barcode.value).map(item =>
+                `<option value="${escapeHTML(item.serial)}">${escapeHTML(item.received_on || "date unknown")}</option>`).join("")}</datalist>`
+            : stock && !stock.serialized ? '<p class="an-note">This product has no serial numbers. Transfer uses quantity only.</p>' : "";
+        };
+        const products = () => {
+          if (draft.length) {
+            draft.length = 0;
+            form.querySelector("[data-transfer-draft]").innerHTML = '<p class="an-note">Source changed. Draft items were cleared; add items from this source branch.</p>';
+          }
+          candidates = liveData.inventoryCatalog.filter(item => item.branch_id === form.elements.from.value && inventoryStockFor(item.branch_id, item.barcode)?.quantity > 0)
+            .map(item => ({...item,label:productLabel(item)}));
+          choices = new Map();
+          for (const item of candidates) {
+            choices.set(item.barcode.toLowerCase(),item);
+            choices.set(item.label.toLowerCase(),item);
+          }
+          form.elements.product.value = ""; form.elements.barcode.value = ""; form.elements.quantity.value = "1";
+          form.elements.product.required = true;
+          form.elements.product.setCustomValidity("");
+          suggestProducts();
+          const branch = liveData.branches.find(item => item.id === form.elements.from.value);
+          form.elements.reference.value = branch?.code ? `${branch.code}-${String(Number(branch.transfer_sequence || 0) + 1).padStart(6, "0")} (preview)` : "Branch code needed — ask Admin";
+          serials();
+        };
+        const chooseProduct = () => {
+          const value = form.elements.product.value.trim().toLowerCase();
+          const item = choices.get(value);
+          const changed = form.elements.barcode.value !== (item?.barcode || "");
+          form.elements.barcode.value = item?.barcode || "";
+          form.elements.product.setCustomValidity(item ? "" : "Choose an available product from the suggestions, or enter its exact barcode.");
+          if (changed) serials();
+          suggestProducts();
+        };
+        form.elements.from.addEventListener("change", products);
+        form.elements.product.addEventListener("input", chooseProduct);
+        form.elements.product.addEventListener("change", chooseProduct);
+        form.elements.quantity.addEventListener("input", () => serials(true));
+        readLine = () => {
+          const barcode = form.elements.barcode.value;
+          const item = candidates.find(item => item.barcode === barcode);
+          if (!item) throw new Error("Choose an available product using its barcode or product suggestions.");
+          const quantity = Number(form.elements.quantity.value), stock = inventoryStockFor(form.elements.from.value, barcode);
+          if (!Number.isInteger(quantity) || quantity < 1 || quantity > stock.quantity) throw new Error("Quantity must be a positive whole number within available stock.");
+          const units = inventoryUnitsFor(form.elements.from.value, barcode);
+          const selected = [...form.querySelectorAll("[data-transfer-serial]")].map(input => {
+            const unit = units.find(item => item.serial.toLowerCase() === input.value.trim().toLowerCase());
+            if (!unit) throw new Error("Choose available serials for this source branch and barcode.");
+            return { serial: unit.serial };
+          });
+          if (stock.serialized && selected.length !== quantity) throw new Error("Choose one serial per transferred unit.");
+          if (new Set(selected.map(item => item.serial.toLowerCase())).size !== selected.length) throw new Error("Choose a different serial per unit.");
+          if (draft.some(line => line.barcode === barcode)) throw new Error("This barcode is already in the draft. Remove it first to change its quantity.");
+          return { barcode, quantity, serials: selected, description: item.model_description, brand: item.brand, available: stock.quantity };
+        };
+        const drawDraft = () => {
+          form.querySelector("[data-transfer-draft]").innerHTML = draft.length ? inventoryTransferSummary(draft, true) : "";
+          form.elements.product.required = !draft.length;
+        };
+        form.querySelector("[data-transfer-add]").addEventListener("click", () => {
+          const error = form.querySelector(".dlg-error");
+          try {
+            draft.push(readLine());
+            form.elements.product.value = ""; form.elements.barcode.value = "";
+            form.elements.product.setCustomValidity(""); form.elements.quantity.value = "1";
+            serials(); drawDraft(); suggestProducts(); error.hidden = true;
+          } catch (caught) {
+            console.error("Unable to add transfer item.", caught);
+            error.textContent = caught.message; error.hidden = false;
+          }
+        });
+        form.querySelector("[data-transfer-draft]").addEventListener("click", event => {
+          const button = event.target.closest("[data-transfer-remove]");
+          if (button) { draft.splice(Number(button.dataset.transferRemove),1); drawDraft(); }
+        });
+        products();
+      },
+      onSubmit: async form => {
+        const lines = [...draft];
+        if (form.elements.product.value.trim()) lines.push(readLine());
+        if (!lines.length) throw new Error("Add at least one transfer item.");
+        const from = form.elements.from.value, to = form.elements.to.value, note = uppercaseEntry(form.elements.note.value);
+        if (from === to) throw new Error("Choose a different destination branch.");
+        openModal({
+          title: "Review transfer summary", wide: true, submitLabel: "Dispatch",
+          intro: `${inventoryBranchName(from)} → ${inventoryBranchName(to)}. Dispatch reserves all items for source BM approval. Cancel returns to the unchanged draft.`,
+          body: inventoryTransferSummary(lines) + `<p class="an-note">Remarks: ${escapeHTML(note || "None")}</p>`,
+          onSubmit: async () => {
+            const batchId = mustRpc(await client.rpc("submit_inventory_transfer", { p_from: from, p_to: to,
+              p_items: lines.map(({barcode,quantity,serials}) => ({barcode,quantity,serials})), p_note: note }));
+            const refreshWarning = await refreshSavedTransfer();
+            await sendTransferPush();
+            const batch = liveData.inventoryTransferBatches.find(item => item.id === batchId);
+            return `<p role="status">Transfer ${escapeHTML(batch?.reference || batchId)} submitted. Stock reserved; awaiting source BM approval.</p>${refreshWarning}`;
+          },
+        });
+        return false;
+      },
+    });
+  }
+
+  function inventoryTransferSummary(lines, removable = false) {
+    return `<div class="connected-table-wrap"><table class="connected-table"><thead><tr><th>Barcode</th><th>Product</th><th>Brand</th><th>Available</th><th>Qty</th><th>Serials</th>${removable ? "<th></th>" : ""}</tr></thead><tbody>${lines.map((line,index) =>
+      `<tr><td>${escapeHTML(line.barcode)}</td><td>${escapeHTML(line.description || line.model_description || "")}</td><td>${escapeHTML(line.brand || "")}</td><td>${line.available ?? "—"}</td><td>${line.quantity}</td><td>${escapeHTML(line.serials.map(unit => unit.serial).join(", ") || "Not serialized")}</td>${removable ? `<td><button type="button" class="button button-outline" data-transfer-remove="${index}">Remove</button></td>` : ""}</tr>`).join("")}</tbody></table></div>`;
+  }
+
+  function canReviewTransfer(branch, source = false) {
+    return (currentProfile.role === "manager" || (!source && inventoryOnly())) &&
+      liveData.branches.some(item => item.id === branch);
+  }
+
+  function inventoryBatchHistory(ids) {
+    const batches = (liveData.inventoryTransferBatches || []).filter(batch => ids.has(batch.from_branch) || ids.has(batch.to_branch));
+    const legacy = liveData.inventoryTransfers.filter(line => !line.batch_id && (ids.has(line.from_branch) || ids.has(line.to_branch)));
+    const grouped = new Map();
+    for (const line of liveData.inventoryTransfers) {
+      if (!grouped.has(line.batch_id)) grouped.set(line.batch_id,[]);
+      grouped.get(line.batch_id).push(line);
+    }
+    const records = [...batches, ...legacy].filter(item => matches(searchQuery(), item.reference, item.note, item.status,inventoryTransferStatus(item.status),
+      inventoryBranchName(item.from_branch), inventoryBranchName(item.to_branch),
+      ...(grouped.get(item.id) || []).map(line => line.barcode), item.barcode))
+      .sort((a,b) => String(b.requested_at || b.dispatched_at).localeCompare(String(a.requested_at || a.dispatched_at)));
+    return panel("Transfer history", "Source BM approves dispatch. Destination BM/IC/SC accepts or rejects the whole transfer. DM/Admin have history access, not approval/receipt authority.",
+      tableBlock("inventory-transfer-batches", ["Reference","From","To","Items","Status","Requested","Remarks",""],records,item => {
+        const isBatch = !!item.requested_at;
+        const actions = isBatch
+          ? item.status === "pending_approval" && canReviewTransfer(item.from_branch,true) ? [["approve","Approve dispatch"],["reject_source","Reject dispatch"]]
+            : item.status === "transit" && canReviewTransfer(item.to_branch) ? [["receive","Accept receipt"],["reject_destination","Reject receipt"]] : []
+          : [];
+        return `<tr><td>${escapeHTML(item.reference || item.id)}</td><td>${escapeHTML(inventoryBranchName(item.from_branch))}</td><td>${escapeHTML(inventoryBranchName(item.to_branch))}</td><td>${isBatch ? grouped.get(item.id)?.length || 0 : 1}</td><td>${escapeHTML(inventoryTransferStatus(item.status))}</td><td>${escapeHTML(item.requested_at || item.dispatched_at)}</td><td>${escapeHTML(item.note)}</td><td>${isBatch ? `<button type="button" class="button button-outline button-small" data-batch-action="view" data-id="${escapeHTML(item.id)}">Summary</button>` : ""}${actions.map(([action,label]) => `<button type="button" class="button button-small" data-batch-action="${action}" data-id="${escapeHTML(item.id)}">${label}</button>`).join("")}${!isBatch && item.status === "transit" ? `${canReviewTransfer(item.to_branch) ? `<button type="button" class="button" data-transfer-action="receive" data-id="${escapeHTML(item.id)}">Accept receipt</button>` : ""}${canReviewTransfer(item.from_branch,true) ? `<button type="button" class="button" data-transfer-action="cancel" data-id="${escapeHTML(item.id)}">Cancel legacy transfer</button>` : ""}` : ""}</td></tr>`;
+      }, "No transfers."));
+  }
+
+  function openInventoryBatchAction(id, action) {
+    const batch = liveData.inventoryTransferBatches.find(item => item.id === id);
+    if (!batch) throw new Error("Transfer not found. Reload Inventory.");
+    const lines = liveData.inventoryTransfers.filter(line => line.batch_id === id).map(line => {
+      const product = liveData.inventoryCatalog.find(item => item.branch_id === batch.from_branch && item.barcode === line.barcode) ||
+        liveData.inventoryCatalog.find(item => item.branch_id === batch.to_branch && item.barcode === line.barcode);
+      return {...line,description:product?.model_description,brand:product?.brand};
+    });
+    openModal({
+      title: `${batch.reference} · ${action === "view" ? "Transfer summary" : action.replaceAll("_"," ")}`, wide: true,
+      intro: `${inventoryBranchName(batch.from_branch)} → ${inventoryBranchName(batch.to_branch)} · ${inventoryTransferStatus(batch.status)}. Rejection immediately restores the source's reserved stock. All lines are processed together.`,
+      body: inventoryTransferSummary(lines) + `<p class="an-note">Remarks: ${escapeHTML(batch.note || "None")}</p>
+        <p class="an-note">Submitted: ${escapeHTML(batch.requested_at)} · User: ${escapeHTML(batch.requested_by)}<br>
+        Source approval: ${escapeHTML(batch.approved_at || "Not approved")} · User: ${escapeHTML(batch.approved_by || "—")}<br>
+        Resolution: ${escapeHTML(batch.resolved_at || "Not resolved")} · User: ${escapeHTML(batch.resolved_by || "—")}</p>`,
+      submitLabel: action === "view" ? "Close" : "Confirm",
+      onSubmit: async () => {
+        if (action === "view") return;
+        mustRpc(await client.rpc("review_inventory_transfer", {p_batch:id,p_action:action}));
+        const refreshWarning = await refreshSavedTransfer({refreshProducts:action === "receive"});
+        await sendTransferPush();
+        return refreshWarning;
+      },
+    });
+  }
+  function openInventoryTransferAction(id, action) {
+    const transfer = liveData.inventoryTransfers.find(item => item.id === id);
+    openModal({
+      title: action === "receive" ? "Confirm transfer receipt" : "Cancel transfer and restore source stock",
+      intro: `${transfer.reference || "Legacy transfer"} · ${transfer.barcode} · ${transfer.quantity} unit(s). ${action === "receive" ? "Confirm these goods physically arrived. Do not receive twice if your external stock report already includes them; receipt must be resolved before importing that report." : "Confirm the goods remain at / have returned to the source branch."}`,
+      body: "", submitLabel: "Confirm",
+      onSubmit: async () => {
+        mustRpc(await client.rpc("resolve_inventory_transfer", { p_transfer: id, p_action: action }));
+        return refreshSavedTransfer({refreshProducts:action === "receive"});
+      },
+    });
+  }
+
+  function saleProducts() {
+    if (saleProductsCache.source !== liveData.products) {
+      const seen = new Set();
+      saleProductsCache = {
+        source: liveData.products,
+        list: liveData.products
+          .filter(product => !seen.has(product.barcode) && seen.add(product.barcode))
+          .sort((a, b) => natural(a.brand, b.brand) || natural(a.model_description, b.model_description)),
+      };
+    }
+    return saleProductsCache.list;
+  }
+  let saleProductsCache = { source: null, list: [] };
+
+  // Suggest only the best few matches instead of putting thousands of options in the page.
+  function productSuggestions(text, available = () => true, catalog = saleProducts()) {
+    const words = String(text || "").toLowerCase().split(/\s+/).filter(Boolean);
+    if (!words.length) return [];
+    const out = [];
+    for (const item of catalog) {
+      const haystack = `${item.brand} ${item.model_description} ${item.barcode}`.toLowerCase();
+      if (words.every(word => haystack.includes(word)) && available(item)) {
+        out.push(item);
+        if (out.length >= 30) break;
+      }
+    }
+    return out;
+  }
+  const productLabel = product => `${product.brand} · ${product.model_description} · ${product.barcode}`;
+
+  const isIndoorSplit = product => /split/i.test(`${product.sub_category || ""} ${product.model_description || ""}`)
+    && !/outdoor/i.test(product.model_description || "");
+
+  // Finds the outdoor unit that goes with a split-type indoor unit: same brand, "Outdoor" in the description, most similar model text.
+  function findOutdoorPartner(indoor, catalog) {
+    const tokens = text => new Set(String(text || "").toLowerCase().replace(/\b(indoor|outdoor)\b/g, " ").split(/[^a-z0-9]+/).filter(Boolean));
+    const base = tokens(indoor.model_description);
+    let best = null;
+    for (const item of catalog) {
+      if (item.brand !== indoor.brand || !/outdoor/i.test(item.model_description || "")) continue;
+      const other = tokens(item.model_description);
+      const shared = [...base].filter(token => other.has(token)).length;
+      const score = shared / Math.max(new Set([...base, ...other]).size, 1);
+      const gap = Math.abs((Number(item.barcode) || 0) - (Number(indoor.barcode) || 0));
+      if (score >= 0.6 && (!best || score > best.score || (score === best.score && gap < best.gap))) best = { item, score, gap };
+    }
+    if (best) return best.item;
+    const next = String(Number(indoor.barcode) + 1).padStart(indoor.barcode.length, "0");
+    return /^\d+$/.test(indoor.barcode) ? catalog.find(item => item.barcode === next && /outdoor/i.test(item.model_description || "")) || null : null;
+  }
+
+  function saleLineRow(line = {}, catalog = saleProducts()) {
+    const product = line.barcode
+      ? catalog.find(item => item.barcode === line.barcode) || { brand: line.brand, model_description: line.model_description, barcode: line.barcode }
+      : null;
+    const total = Number(line.selling_price || 0) * Number(line.quantity || 0);
+    return `<div class="sale-row" data-srp-for="${escapeHTML(product?.barcode || "")}">
+      <label class="field sale-product"><span>Product (type a model, brand or barcode)</span><input name="product" list="sale-products" autocomplete="off" placeholder="Start typing…" required value="${product ? escapeHTML(productLabel(product)) : ""}"></label>
+      <label class="field"><span>Barcode</span><input name="code" readonly tabindex="-1" value="${escapeHTML(product?.barcode || "")}"></label>
+      <label class="field"><span>SRP (₱)</span><input name="srp" type="number" min="0" step="0.01" required value="${line.srp ?? ""}"></label>
+      <label class="field"><span>Price (₱)</span><input name="price" type="number" min="0" step="0.01" required value="${line.selling_price ?? ""}"></label>
+      <label class="field"><span>Qty</span><input name="quantity" type="number" min="1" step="1" required value="${line.quantity ?? 1}"></label>
+      <label class="field"><span>Total</span><input name="linetotal" readonly tabindex="-1" value="${total ? formatMoney(total) : ""}"></label>
+      <button class="dlg-remove" type="button" data-remove-line aria-label="Remove product line">×</button>
+      <div class="sale-inventory-serials"></div>
+    </div>`;
+  }
+
+  // Philippine cities/towns and barangays come from the free public PSGC API (loaded on demand, cached on this device).
+  const PSGC_URL = "https://psgc.gitlab.io/api/";
+  let psgcPlaces = null;
+  const psgcBarangays = new Map();
+
+  async function loadPlaces() {
+    if (psgcPlaces) return psgcPlaces;
+    try {
+      const cached = JSON.parse(localStorage.getItem("branchline-psgc-v1") || "null");
+      if (Array.isArray(cached) && cached.length) return (psgcPlaces = cached);
+    } catch { /* ignore a bad cache */ }
+    const [cities, provinces] = await Promise.all([
+      fetch(`${PSGC_URL}cities-municipalities/`).then(response => response.json()),
+      fetch(`${PSGC_URL}provinces/`).then(response => response.json()),
+    ]);
+    const provinceName = new Map(provinces.map(item => [item.code, item.name]));
+    psgcPlaces = cities.map(item => {
+      const name = String(item.name).replace(/^City of (.+)$/i, "$1 City");
+      const province = provinceName.get(item.provinceCode) || (item.regionCode === "130000000" ? "Metro Manila" : "");
+      return [item.code, province ? `${name}, ${province}` : name];
+    });
+    try { localStorage.setItem("branchline-psgc-v1", JSON.stringify(psgcPlaces)); } catch { /* storage full */ }
+    return psgcPlaces;
+  }
+
+  async function loadBarangays(code) {
+    if (psgcBarangays.has(code)) return psgcBarangays.get(code);
+    const list = await fetch(`${PSGC_URL}cities-municipalities/${code}/barangays/`).then(response => response.json());
+    const names = list.map(item => item.name).sort(natural);
+    psgcBarangays.set(code, names);
+    return names;
+  }
+
+  // Barcode reading: the browser's built-in detector when it has one (Android, Mac), otherwise the ZXing library
+  // (loaded on first use) so it also works on Windows desktop. Label text is read with Tesseract OCR as a last resort.
+  const ZXING_URL = "https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js";
+  const TESSERACT_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
+  const scriptLoads = new Map();
+
+  function loadScript(src) {
+    if (!scriptLoads.has(src)) {
+      scriptLoads.set(src, new Promise((resolve, reject) => {
+        const el = document.createElement("script");
+        el.src = src;
+        el.onload = resolve;
+        el.onerror = () => {
+          scriptLoads.delete(src);
+          reject(new Error("The reader could not be downloaded. Check the internet connection."));
+        };
+        document.head.appendChild(el);
+      }));
+    }
+    return scriptLoads.get(src);
+  }
+
+  let nativeDetector = null;
+
+  function decodeWithZXing(canvas) {
+    const Z = window.ZXing;
+    const hints = new Map([[Z.DecodeHintType.TRY_HARDER, true]]);
+    const reader = new Z.MultiFormatReader();
+    reader.setHints(hints);
+    const source = new Z.HTMLCanvasElementLuminanceSource(canvas);
+    for (const binarizer of [Z.HybridBinarizer, Z.GlobalHistogramBinarizer]) {
+      try {
+        return reader.decode(new Z.BinaryBitmap(new binarizer(source))).getText().trim();
+      } catch { /* not found with this method */ }
+    }
+    return "";
+  }
+
+  async function decodeCanvas(canvas) {
+    if ("BarcodeDetector" in window) {
+      try {
+        nativeDetector = nativeDetector || new BarcodeDetector();
+        const found = await nativeDetector.detect(canvas);
+        const value = found.map(item => String(item.rawValue || "").trim()).find(Boolean);
+        if (value) return value;
+      } catch { /* fall through to ZXing */ }
+    }
+    await loadScript(ZXING_URL);
+    return decodeWithZXing(canvas);
+  }
+
+  // Possible serial numbers in OCR text: anything after "S/N" or "Serial", then other long letter-and-digit tokens.
+  function serialCandidates(text) {
+    const upper = String(text || "").toUpperCase();
+    const out = [];
+    const add = value => {
+      const clean = String(value).replace(/^[^A-Z0-9]+|[^A-Z0-9]+$/g, "");
+      if (clean.length >= 6 && /\d/.test(clean) && /^[A-Z0-9-]+$/.test(clean) && !out.includes(clean)) out.push(clean);
+    };
+    for (const match of upper.matchAll(/(?:S\s*\/?\s*N|SERIAL(?:\s*(?:NO\.?|NUMBER|#))?)\s*[:.#-]?\s*([A-Z0-9][A-Z0-9-]{4,})/g)) add(match[1]);
+    upper.split(/[\s,;|]+/).forEach(add);
+    return out.slice(0, 5);
+  }
+
+  // Makes label text easier for OCR: enlarge small images, grey-scale, stretch the contrast.
+  function enhanceForText(canvas) {
+    const scale = canvas.width < 1600 ? Math.min(2.5, 1600 / canvas.width) : 1;
+    const out = document.createElement("canvas");
+    out.width = Math.round(canvas.width * scale);
+    out.height = Math.round(canvas.height * scale);
+    const ctx = out.getContext("2d");
+    ctx.drawImage(canvas, 0, 0, out.width, out.height);
+    const image = ctx.getImageData(0, 0, out.width, out.height);
+    const px = image.data;
+    let lo = 255;
+    let hi = 0;
+    for (let i = 0; i < px.length; i += 4) {
+      const grey = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+      px[i] = grey;
+      if (grey < lo) lo = grey;
+      if (grey > hi) hi = grey;
+    }
+    const range = Math.max(hi - lo, 1);
+    for (let i = 0; i < px.length; i += 4) {
+      const value = Math.min(255, Math.max(0, ((px[i] - lo) * 255) / range));
+      px[i] = px[i + 1] = px[i + 2] = value;
+    }
+    ctx.putImageData(image, 0, 0);
+    return out;
+  }
+
+  let ocrWorker = null;
+
+  // Returns the likely serial numbers first, then the other readable lines, so the user can tap the right one.
+  async function readLabelText(canvas) {
+    await loadScript(TESSERACT_URL);
+    if (!ocrWorker) {
+      ocrWorker = await Tesseract.createWorker("eng");
+      await ocrWorker.setParameters({ tessedit_pageseg_mode: "6" });
+    }
+    const { data } = await ocrWorker.recognize(enhanceForText(canvas));
+    const picks = serialCandidates(data.text);
+    String(data.text || "").split(/\r?\n/).map(line => line.trim()).filter(line => line.replace(/\s/g, "").length >= 6).forEach(line => {
+      if (picks.length < 10 && !picks.includes(line)) picks.push(line);
+    });
+    return picks;
+  }
+
+  // Tries to read one photo: barcode first (a few sizes), then the label text.
+  async function readPhoto(file, onStage) {
+    for (const size of [2400, 1400, 900]) {
+      const value = await decodeCanvas(await canvasFromFile(file, size)).catch(() => "");
+      if (value) return { value, picks: [] };
+    }
+    onStage?.("No barcode found. Reading the label text… this can take a few seconds the first time.");
+    const picks = await readLabelText(await canvasFromFile(file, 2400));
+    return picks.length ? { value: picks[0], picks: picks.slice(1), fromText: true } : null;
+  }
+
+  async function canvasFromFile(file, longest = 2000) {
+    const bitmap = await createImageBitmap(file);
+    try {
+      const scale = Math.min(1, longest / Math.max(bitmap.width, bitmap.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(bitmap.width * scale);
+      canvas.height = Math.round(bitmap.height * scale);
+      canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      return canvas;
+    } finally {
+      bitmap.close?.();
+    }
+  }
+
+  // Opens the camera with an aiming frame. Resolves { value, fromText } or null when cancelled.
+  // Only the area inside the frame is analysed, at the camera's full resolution.
+  function scanWithCamera(host) {
+    return new Promise((resolve, reject) => {
+      const GUIDE = { x: 0.1, y: 0.22, w: 0.8, h: 0.5 };
+      const box = document.createElement("div");
+      box.className = "serial-pop serial-scan";
+      box.innerHTML = `<div class="serial-card">
+        <p class="dlg-intro">Show the whole barcode (or QR code) in the view. Hold the phone 10–20 cm away and keep it steady. The sharpest option is <strong>Take photo</strong>, which uses your phone’s own camera.</p>
+        <div class="scan-view"><video playsinline muted></video>
+          <div class="scan-guide"><i></i><i></i><i></i><i></i></div></div>
+        <p class="scan-status" role="status">Starting the camera…</p>
+        <div class="scan-tools" hidden><label>Zoom <input type="range" data-scan-zoom></label><button class="button button-outline button-small" type="button" data-scan-torch hidden>Light</button></div>
+        <div class="scan-picks" hidden></div>
+        <input type="file" accept="image/*" capture="environment" hidden data-scan-photo>
+        <div class="dlg-actions"><button class="button button-primary" type="button" data-scan-take>Take photo</button><button class="button button-outline" type="button" data-scan-text>Read label text</button><button class="button button-outline" type="button" data-scan-cancel>Cancel</button></div>
+      </div>`;
+      host.appendChild(box);
+      const video = box.querySelector("video");
+      const view = box.querySelector(".scan-view");
+      const status = box.querySelector(".scan-status");
+      const picksBox = box.querySelector(".scan-picks");
+      let stream = null;
+      let timer = null;
+      let closed = false;
+      let tick = 0;
+      const finish = value => {
+        closed = true;
+        clearInterval(timer);
+        stream?.getTracks().forEach(track => track.stop());
+        box.remove();
+        resolve(value);
+      };
+      // Several possible readings: let the user tap the right one.
+      const offerPicks = (picks, label) => {
+        status.textContent = label;
+        picksBox.hidden = false;
+        picksBox.innerHTML = picks.map(text => `<button class="button button-outline button-small" type="button" data-pick="${escapeHTML(text)}">${escapeHTML(text)}</button>`).join("");
+      };
+      picksBox.addEventListener("click", event => {
+        const pick = event.target.closest("[data-pick]");
+        if (pick) finish({ value: pick.dataset.pick, fromText: true, picks: [] });
+      });
+      // Cuts the frame area out of the video, or the whole frame when `whole` is set.
+      const grab = whole => {
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        const cw = view.clientWidth;
+        const ch = view.clientHeight;
+        if (!vw || !cw) return null;
+        let sx = 0;
+        let sy = 0;
+        let sw = vw;
+        let sh = vh;
+        if (!whole) {
+          const scale = Math.max(cw / vw, ch / vh);
+          const ox = (vw * scale - cw) / 2;
+          const oy = (vh * scale - ch) / 2;
+          sx = Math.max(0, (GUIDE.x * cw + ox) / scale);
+          sy = Math.max(0, (GUIDE.y * ch + oy) / scale);
+          sw = Math.min(vw - sx, (GUIDE.w * cw) / scale);
+          sh = Math.min(vh - sy, (GUIDE.h * ch) / scale);
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(sw);
+        canvas.height = Math.round(sh);
+        canvas.getContext("2d").drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+        return canvas;
+      };
+      box.querySelector("[data-scan-cancel]").addEventListener("click", () => finish(null));
+      box.querySelector("[data-scan-take]").addEventListener("click", () => box.querySelector("[data-scan-photo]").click());
+      box.querySelector("[data-scan-photo]").addEventListener("change", async event => {
+        const file = event.target.files?.[0];
+        if (!file) return;
+        clearInterval(timer);
+        picksBox.hidden = true;
+        status.textContent = "Reading the photo…";
+        try {
+          const result = await readPhoto(file, text => { status.textContent = text; });
+          if (!result) {
+            status.textContent = "Nothing readable in that photo. Try again closer, with more light.";
+          } else if (result.fromText && result.picks.length) {
+            offerPicks([result.value, ...result.picks], "No barcode found. Tap the serial number from the label text:");
+          } else {
+            finish(result);
+          }
+        } catch (caught) {
+          status.textContent = caught.message;
+        }
+        event.target.value = "";
+      });
+      box.querySelector("[data-scan-text]").addEventListener("click", async event => {
+        const button = event.currentTarget;
+        const canvas = grab(true);
+        if (!canvas) return;
+        button.disabled = true;
+        picksBox.hidden = true;
+        status.textContent = "Reading the label… this can take a few seconds the first time.";
+        try {
+          const barcode = await decodeCanvas(canvas).catch(() => "");
+          if (barcode) return finish({ value: barcode, picks: [] });
+          const found = await readLabelText(canvas);
+          if (found.length) offerPicks(found, "Tap the serial number from the label text:");
+          else status.textContent = "No text could be read. Move closer, add light, or use Take photo.";
+        } catch (caught) {
+          status.textContent = caught.message;
+        }
+        button.disabled = false;
+      });
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } } }).then(async media => {
+        if (closed) return media.getTracks().forEach(track => track.stop());
+        stream = media;
+        video.srcObject = media;
+        await video.play();
+        status.textContent = "Looking for a barcode…";
+        const track = media.getVideoTracks()[0];
+        const caps = track.getCapabilities?.() || {};
+        if (caps.focusMode?.includes("continuous")) track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
+        const tools = box.querySelector(".scan-tools");
+        const zoom = box.querySelector("[data-scan-zoom]");
+        if (caps.zoom) {
+          tools.hidden = false;
+          zoom.min = caps.zoom.min;
+          zoom.max = caps.zoom.max;
+          zoom.step = caps.zoom.step || 0.1;
+          zoom.value = caps.zoom.min;
+          zoom.addEventListener("input", () => track.applyConstraints({ advanced: [{ zoom: Number(zoom.value) }] }).catch(() => {}));
+        } else {
+          zoom.closest("label").hidden = true;
+        }
+        if (caps.torch) {
+          tools.hidden = false;
+          const torch = box.querySelector("[data-scan-torch]");
+          torch.hidden = false;
+          let on = false;
+          torch.addEventListener("click", () => {
+            on = !on;
+            track.applyConstraints({ advanced: [{ torch: on }] }).catch(() => {});
+          });
+        }
+        loadScript(ZXING_URL).catch(() => {});
+        let busy = false;
+        timer = setInterval(async () => {
+          if (busy || closed || video.readyState < 2) return;
+          busy = true;
+          try {
+            // Alternate between the whole picture and the framed area, like a dedicated scanner app.
+            const canvas = grab(tick++ % 2 === 0);
+            const value = canvas && ("BarcodeDetector" in window || window.ZXing) ? await decodeCanvas(canvas) : "";
+            if (value && !closed) finish({ value, picks: [] });
+          } catch { /* keep trying */ }
+          busy = false;
+        }, 200);
+      }).catch(caught => {
+        box.remove();
+        reject(new Error(caught?.name === "NotAllowedError" ? "Camera permission was denied." : "The camera could not be opened."));
+      });
+    });
+  }
+
+  // Pop-up listing one entry box per unit of every product in the sale. `groups` = [{ barcode, label, qty }].
+  function openSerialPopup(host, groups, serials, onDone) {
+    const pop = document.createElement("div");
+    pop.className = "serial-pop";
+    pop.innerHTML = `<div class="serial-card" role="dialog" aria-modal="true" aria-label="Serial numbers">
+      <div class="dlg-head"><h2>Serial numbers</h2><button class="dlg-close" type="button" data-serial-cancel aria-label="Close">×</button></div>
+      <div class="serial-body">
+        <p class="dlg-intro">Optional. Type each serial number, scan its barcode with the camera, or upload a photo of the label. Leave blank any unit without one.</p>
+        ${groups.map(group => `<section class="serial-group" data-barcode="${escapeHTML(group.barcode)}">
+          <h3>${escapeHTML(group.label)} <small>${escapeHTML(group.barcode)} · qty ${group.qty}</small></h3>
+          <div class="serial-grid">${Array.from({ length: group.qty }, (_, index) => `<div class="serial-item">
+            <input data-serial placeholder="Unit ${index + 1}" autocomplete="off" value="${escapeHTML((serials.get(group.barcode) || [])[index] || "")}">
+            <button class="button button-outline button-small" type="button" data-serial-scan>Scan</button>
+            <button class="button button-outline button-small" type="button" data-serial-photo>Photo</button>
+          </div>`).join("")}</div>
+        </section>`).join("")}
+        <input type="file" accept="image/*" hidden data-serial-file>
+      </div>
+      <p class="dlg-error" role="alert" hidden></p>
+      <div class="scan-picks" hidden></div>
+      <div class="dlg-actions"><button class="button button-outline" type="button" data-serial-cancel>Cancel</button><button class="button button-primary" type="button" data-serial-save>Save serial numbers</button></div>
+    </div>`;
+    host.appendChild(pop);
+    const error = pop.querySelector(".dlg-error");
+    const picks = pop.querySelector(".scan-picks");
+    const fileInput = pop.querySelector("[data-serial-file]");
+    let target = null;
+    const say = text => { error.textContent = text; error.hidden = !text; };
+    const close = () => pop.remove();
+    pop.addEventListener("keydown", event => {
+      if (event.key === "Escape") { event.stopPropagation(); close(); }
+    });
+    pop.addEventListener("click", async event => {
+      if (event.target === pop || event.target.closest("[data-serial-cancel]")) return close();
+      const input = event.target.closest(".serial-item")?.querySelector("[data-serial]");
+      if (event.target.closest("[data-serial-scan]")) {
+        say("");
+        try {
+          const result = await scanWithCamera(pop);
+          if (result) {
+            input.value = result.value;
+            say(result.fromText ? `Read from the label text: ${result.value}. Please check it against the label.` : "");
+          }
+        } catch (caught) {
+          say(caught.message);
+        }
+      }
+      if (event.target.closest("[data-serial-photo]")) {
+        say("");
+        target = input;
+        fileInput.value = "";
+        fileInput.click();
+      }
+      if (event.target.closest("[data-serial-save]")) {
+        const result = new Map();
+        const seen = new Set();
+        for (const section of pop.querySelectorAll(".serial-group")) {
+          const values = [...section.querySelectorAll("[data-serial]")].map(box => box.value.trim());
+          for (const value of values.filter(Boolean)) {
+            const key = value.toLowerCase();
+            if (seen.has(key)) return say(`The serial number "${value}" is entered more than once.`);
+            seen.add(key);
+          }
+          result.set(section.dataset.barcode, values);
+        }
+        onDone(result);
+        close();
+      }
+    });
+    fileInput.addEventListener("change", async () => {
+      const file = fileInput.files?.[0];
+      if (!file || !target) return;
+      say("Reading the photo…");
+      picks.hidden = true;
+      try {
+        const result = await readPhoto(file, say);
+        if (!result) return say("Nothing readable was found in that photo. Retake it closer and in focus, or type the serial number.");
+        target.value = result.value;
+        if (!result.fromText) return say("");
+        say(`Read from the label text: ${result.value}. Check it against the label${result.picks.length ? " or tap another line:" : "."}`);
+        if (result.picks.length) {
+          const field = target;
+          picks.hidden = false;
+          picks.innerHTML = result.picks.map(text => `<button class="button button-outline button-small" type="button" data-pick="${escapeHTML(text)}">${escapeHTML(text)}</button>`).join("");
+          picks.onclick = click => {
+            const pick = click.target.closest("[data-pick]");
+            if (!pick) return;
+            field.value = pick.dataset.pick;
+            picks.hidden = true;
+            say("");
+          };
+        }
+      } catch (caught) {
+        say(caught?.message || "That photo could not be read. Type the serial number instead.");
+      }
+    });
+  }
+
+  function paymentSelectHTML(current) {
+    const names = liveData.paymentModes.map(mode => mode.name);
+    if (current && !names.some(name => name.toLowerCase() === current.toLowerCase())) names.push(current);
+    const match = names.find(name => name.toLowerCase() === String(current || "").toLowerCase()) || "";
+    return `<select name="payment" required><option value="">Select…</option>${names.map(name =>
+      `<option value="${escapeHTML(name)}" ${name === match ? "selected" : ""}>${escapeHTML(name)}</option>`).join("")}</select>`;
+  }
+
+  // Records a new sale, or corrects an existing one when `sale` is given.
+  function openPromotionSaleLookup() {
+    if (demoStore || currentProfile?.role !== "ps") throw new Error("Promotion sales require a signed-in product specialist.");
+    const lookupClient = client, profileId = currentProfile.id, branchId = currentProfile.branch_id;
+    let matches = [];
+    openModal({
+      title: "Find a promotion", readOnly: true,
+      intro: "Enter the promotion barcode. A manager must review the included products before the offer can be sold.",
+      body: `<label class="field"><span>Promotion barcode</span><input name="promotion_barcode" autocomplete="off"></label>
+        <button class="button button-outline" type="button" data-find-promotion>Find promotion</button>
+        <p data-promotion-status role="status"></p><div data-promotion-results></div>`,
+      onReady: form => {
+        const status = form.querySelector("[data-promotion-status]"), result = form.querySelector("[data-promotion-results]");
+        form.querySelector("[data-find-promotion]").addEventListener("click", async () => {
+          const code = normBarcode(form.elements.promotion_barcode.value);
+          matches = []; result.innerHTML = "";
+          if (!code) { status.textContent = "Enter a promotion barcode."; return; }
+          status.textContent = "Finding reviewed promotions...";
+          try {
+            const response = await lookupClient.from("reviewed_promotions").select("*").eq("branch_id", branchId)
+              .eq("barcode", code).is("revoked_at", null).order("reviewed_at", { ascending: false }).limit(50);
+            if (response.error) throw response.error;
+            if (client !== lookupClient || currentProfile?.id !== profileId) throw new Error("The account changed. Reopen promotion search.");
+            matches = response.data;
+            result.innerHTML = matches.map((item, index) => `<div class="field"><strong>${escapeHTML(item.description)}</strong>
+              <span>${escapeHTML(`${item.valid_from || "Start date unknown"} to ${item.valid_to || "End date unknown"} · ${item.source_name}, page ${item.source_page}`)}</span>
+              <button type="button" class="button button-outline" data-use-promotion="${index}">Use this promotion</button></div>`).join("");
+            status.textContent = matches.length ? "Check the offer and its date before choosing." : "No unretired reviewed promotion matches this barcode in your branch.";
+          } catch (error) {
+            console.error("Promotion lookup failed.", error);
+            status.textContent = `Unable to find promotions: ${friendlyError(error)}`;
+          }
+        });
+        form.addEventListener("click", event => {
+          const button = event.target.closest("[data-use-promotion]");
+          if (!button) return;
+          if (client !== lookupClient || currentProfile?.id !== profileId) { status.textContent = "The account changed. Reopen promotion search."; return; }
+          const promotion = matches[Number(button.dataset.usePromotion)];
+          if (!promotion) { status.textContent = "Choose a reviewed promotion."; return; }
+          try { closeModal(); openSaleModal(null, promotion); }
+          catch (error) { console.error("Unable to open promotion sale.", error); alert(friendlyError(error)); }
+        });
+      },
+    });
+  }
+
+  function promotionChoiceLabel(item) {
+    const price = item.tag_price == null ? "Price to be entered" : formatMoney(item.tag_price);
+    return `PROMOTION · ${item.barcode} · ${item.description} · ${price} · ${item.source_name}, p. ${item.source_page} · ${item.id}`;
+  }
+
+  async function loadSaleCatalog(lookupClient, branchId) {
+    const response = await fetchAllFrom(lookupClient, "products", "id,branch_id,barcode,model_description,brand,category,sub_category,active,srp",
+      [["model_description", true], ["id", true]], query => query.eq("branch_id", branchId).eq("active", true));
+    return normalizeProductRows(checkResult(response, "Unable to load the selected branch's products"))
+      .sort((a, b) => natural(a.brand, b.brand) || natural(a.model_description, b.model_description));
+  }
+
+  async function openEditSaleModal(sale, button) {
+    if (button.disabled) return;
+    button.disabled = true;
+    const lookupClient = client, profileId = currentProfile.id;
+    try {
+      let catalog = saleProducts();
+      let savedPromotions = [];
+      if (!demoStore) {
+        const result = await lookupClient.from("sale_promotion_groups")
+          .select("id,promotion_id,barcode,description,bundle_total,source_snapshot,sale_promotion_lines(line_id)")
+          .eq("sale_id", sale.id).order("id");
+        savedPromotions = checkResult(result, "Unable to load this sale's bundles");
+        if (savedPromotions.length && !canCorrectBundleSale(currentProfile.role)) {
+          throw new Error("Ask your manager to correct this bundle sale.");
+        }
+      }
+      if (!demoStore && (!catalog.length || catalog.some(product => product.branch_id !== sale.branch_id))) {
+        catalog = await loadSaleCatalog(lookupClient, sale.branch_id);
+      }
+      if (button.isConnected && client === lookupClient && currentProfile?.id === profileId) {
+        openSaleModal(sale, null, null, catalog, savedPromotions);
+      }
+    } catch (error) {
+      if (button.isConnected) alert(friendlyError(error));
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function openAdminTestSale() {
+    const account = currentProfile;
+    if (account.role !== "admin") return;
+    const branches = [...liveData.branches].sort((a, b) => natural(a.name, b.name));
+    const initial = ui.branch || account.branch_id || (branches.length === 1 ? branches[0].id : "");
+    const lookupClient = client;
+    openModal({
+      title: "Choose a branch for the test sale",
+      body: fieldHTML("Branch", "branch", `<select name="branch" required><option value="">Select a branch…</option>${branches.map(branch =>
+        `<option value="${escapeHTML(branch.id)}" ${branch.id === initial ? "selected" : ""}>${escapeHTML(branch.name)}</option>`).join("")}</select>`),
+      submitLabel: "Continue",
+      onSubmit: async form => {
+        const branch = branches.find(item => item.id === form.elements.branch.value);
+        if (!branch) throw new Error("Select a branch for the test sale.");
+        const catalog = await loadSaleCatalog(lookupClient, branch.id);
+        if (client !== lookupClient || currentProfile?.id !== account.id || currentProfile.role !== "admin") {
+          throw new Error("The account changed. Reopen Record Sale.");
+        }
+        if (!form.isConnected) return false;
+        openSaleModal(undefined, null, { branch, catalog, accountId: account.id });
+        return false;
+      },
+    });
+  }
+
+  function openSaleModal(sale, promotion = null, test = null, catalog = test?.catalog ?? saleProducts(), savedPromotions = []) {
+    const saleBranch = test?.branch.id ?? sale?.branch_id ?? currentProfile.branch_id;
+    const renderLine = line => saleLineRow(line, catalog);
+    const promotionGroups = new Map();
+    let nextPromotionGroup = 0;
+    const promotionHeader = (item, group) => `<div data-promotion-header="${group}" class="field">
+      <strong>Promotion barcode ${escapeHTML(item.barcode)} · ${escapeHTML(item.description)}</strong>
+      <span>${item.tag_price == null ? "Enter the amount charged." : `Memo offer ${escapeHTML(formatMoney(item.tag_price))}`}</span>
+      <input name="bundle_price" aria-label="Bundle selling price (PHP)" placeholder="Enter bundle selling price (PHP)" type="number" min="0" step="0.01" value="${escapeHTML(item.savedTotal ?? "")}" required>
+      ${!item.savedGroupId && (!item.valid_from || !item.valid_to || item.price_conflict) ? '<label class="check-row"><input type="checkbox" name="confirm_promotion_warning" required> I checked the incomplete dates or conflicting prices against the source.</label>' : ""}
+      <button type="button" class="button button-outline button-small" data-remove-promotion>Remove bundle</button></div>`;
+    let lines = sale ? linesForSale(sale.id) : [{}];
+    if (promotion) {
+      promotionGroups.set(++nextPromotionGroup, promotion);
+      const quantities = new Map();
+      for (const component of promotion.components) quantities.set(component.barcode, (quantities.get(component.barcode) || 0) + component.quantity);
+      lines = [...quantities].map(([barcode, quantity]) => {
+        const product = catalog.find(item => item.barcode === barcode);
+        if (!product) throw new Error(`Promotion product ${barcode} is unavailable in your branch catalog. Ask a manager to review it.`);
+        return { barcode, quantity, srp: product.srp, selling_price: 0 };
+      });
+    }
+    const savedLineIds = new Set();
+    const savedBundleRows = savedPromotions.map(saved => {
+      const item = { ...saved.source_snapshot, id: saved.promotion_id, barcode: saved.barcode,
+        description: saved.description, savedGroupId: saved.id, savedTotal: saved.bundle_total };
+      const quantities = new Map();
+      for (const { line_id } of saved.sale_promotion_lines) {
+        const line = lines.find(entry => entry.id === line_id);
+        if (!line || savedLineIds.has(line_id)) throw new Error("This sale changed. Refresh the sales view and reopen it.");
+        savedLineIds.add(line_id);
+        const entry = quantities.get(line.barcode) || { ...line, quantity: 0, selling_price: 0 };
+        entry.quantity += Number(line.quantity);
+        quantities.set(line.barcode, entry);
+      }
+      if (!quantities.size) throw new Error("The bundle's saved items could not be loaded. Refresh and reopen the sale.");
+      const group = ++nextPromotionGroup;
+      promotionGroups.set(group, item);
+      return promotionHeader(item, group) + [...quantities.values()].map(line =>
+        renderLine(line).replace('class="sale-row"', `class="sale-row" data-promotion-group="${group}"`)).join("");
+    });
+    const deliveryFee = liveData.deliveryGuaranties.find(item => item.sale_id === sale?.id)?.amount ?? null;
+    const resolve = text => {
+      const value = String(text || "").trim().toLowerCase();
+      return catalog.find(item => productLabel(item).toLowerCase() === value)
+        || catalog.find(item => item.barcode.toLowerCase() === normBarcode(value).toLowerCase())
+        || null;
+    };
+    openModal({
+      title: test ? "Record a test sale" : sale ? `Edit sale · ${sale.invoice_number}` : promotion ? "Record a promotion sale" : "Record a sale",
+      intro: test ? `${test.branch.name} · Test only` : sale ? "Corrections are saved with the previous values kept in the edit history." : promotion ? "The bundle price is counted once. Included products are used for inventory and serial tracking; their prices are allocated for reporting." : "",
+      submitLabel: test ? "Validate test sale" : sale ? "Save changes" : "Save sale",
+      wide: true,
+      body: `<div class="dlg-grid">
+          <div class="sale-customer-picker">
+            ${fieldHTML("Customer", "customer", `<input name="customer" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="sale-customer-options" autocomplete="off" required value="${escapeHTML(sale?.customer_name || "")}">`)}
+            <div id="sale-customer-options" class="sale-customer-options" role="listbox" aria-label="Existing customers" hidden></div>
+          </div>
+          ${fieldHTML("Invoice number", "invoice", `<input name="invoice" autocomplete="off" required value="${escapeHTML(sale?.invoice_number || "")}">`)}
+          ${fieldHTML("Date", "date", `<input name="date" type="date" required value="${escapeHTML(sale?.sold_on || localISODate())}">`)}
+          ${fieldHTML("Mode of payment", "payment", paymentSelectHTML(sale?.payment_mode))}
+          ${fieldHTML("Delivery / Pick up", "fulfillment", `<select name="fulfillment" ${!sale || sale.fulfillment_method ? "required" : ""}><option value="">${sale ? "Not specified (older sale)" : "Select..."}</option><option value="delivery" ${sale?.fulfillment_method === "delivery" ? "selected" : ""}>Delivery</option><option value="pickup" ${sale?.fulfillment_method === "pickup" ? "selected" : ""}>Pick up</option></select>`)}
+        <div class="delivery-fee-fields" ${sale?.fulfillment_method === "delivery" ? "" : "hidden"}>
+          ${fieldHTML("Delivery Guarranty amount (PHP)", "dg_amount", `<input name="dg_amount" aria-label="Delivery Guarranty amount (PHP)" placeholder="Enter 0.00 for free delivery" type="number" inputmode="decimal" min="0" max="9999999999.99" step="0.01" value="${escapeHTML(deliveryFee ?? "")}" ${sale?.fulfillment_method === "delivery" ? "required" : "disabled"}>`)}
+        </div>
+        </div>
+        <div class="dlg-grid">
+          ${fieldHTML("City / municipality", "city", `<input name="city" list="sale-cities" autocomplete="off" required placeholder="e.g. Santiago City" value="${escapeHTML(sale?.city || "")}">`)}
+          ${fieldHTML("Barangay", "barangay", `<input name="barangay" list="sale-barangays" autocomplete="off" required placeholder="Pick a city first" value="${escapeHTML(sale?.barangay || "")}">`)}
+        </div>
+        <datalist id="sale-cities"></datalist>
+        <datalist id="sale-barangays"></datalist>
+        <datalist id="sale-products"></datalist>
+        <label class="check-row sale-unlisted-toggle"><input type="checkbox" name="show_unavailable"> Show unavailable products for manual late-sale serial entry</label>
+        <p data-sale-promotion-status role="status"></p>
+        ${promotion ? promotionHeader(promotion, nextPromotionGroup) : ""}
+        <div id="sale-rows">${lines.filter(line => !savedLineIds.has(line.id)).map(renderLine).join("")}${savedBundleRows.join("")}</div>
+        <div class="sale-footer"><span class="sale-footer-actions"><button class="button button-outline button-small" type="button" data-add-line>+ Add product line</button></span><strong>Sale total: <span id="sale-total">${formatMoney(lines.reduce((sum, line) => sum + Number(line.selling_price || 0) * Number(line.quantity || 0), 0))}</span></strong></div>
+        ${sale ? '<label class="check-row"><input name="reconcile" type="checkbox"> Apply quantity/serial corrections to current inventory if this sale was included in a replacement snapshot. Prices and customer corrections do not require this.</label>' : ""}`,
+      onReady: form => {
+        const markPromotionComponent = (row, group) => {
+          row.dataset.promotionGroup = group;
+          for (const name of ["product", "srp", "price", "quantity"]) row.querySelector(`[name="${name}"]`).readOnly = true;
+          for (const name of ["price", "linetotal"]) row.querySelector(`[name="${name}"]`).closest("label").hidden = true;
+          row.querySelector('[name="product"]').closest("label").querySelector("span").hidden = true;
+          row.querySelector("[data-remove-line]").hidden = true;
+        };
+        if (promotion) form.querySelectorAll(".sale-row").forEach(row => markPromotionComponent(row, nextPromotionGroup));
+        form.querySelectorAll(".sale-row[data-promotion-group]").forEach(row => markPromotionComponent(row, row.dataset.promotionGroup));
+        const syncDelivery = () => {
+          const delivery = form.elements.fulfillment.value === "delivery";
+          form.querySelector(".delivery-fee-fields").hidden = !delivery;
+          form.elements.dg_amount.disabled = !delivery;
+          form.elements.dg_amount.required = delivery;
+        };
+        form.elements.fulfillment.addEventListener("change", syncDelivery);
+        syncDelivery();
+        wireSaleCustomerPicker(form, saleBranch);
+        const serials = new Map();
+        const manualModes = new Set();
+        (sale ? liveData.serialsBySale.get(sale.id) || [] : []).forEach(row => {
+          if (!serials.has(row.barcode)) serials.set(row.barcode, []);
+          serials.get(row.barcode).push(row.serial);
+        });
+        const saleGroups = () => {
+          const groups = new Map();
+          form.querySelectorAll(".sale-row").forEach(row => {
+            const product = resolve(row.querySelector('[name="product"]').value);
+            const qty = Number(row.querySelector('[name="quantity"]').value);
+            if (!product || !Number.isInteger(qty) || qty < 1) return;
+            const group = groups.get(product.barcode) || { barcode: product.barcode, row, product, qty: 0 };
+            group.qty += qty;
+            groups.set(product.barcode, group);
+          });
+          return [...groups.values()];
+        };
+        for (const [barcode] of serials) {
+          if (!inventoryStockFor(saleBranch, barcode)?.serialized) manualModes.add(barcode);
+        }
+        const serialOptions = (barcode, selected) => `<option value="">Select serial for this sale...</option>${inventorySaleUnitsFor(saleBranch, barcode, sale?.id)
+          .map(item => `<option value="${escapeHTML(item.serial)}" ${item.serial === selected ? "selected" : ""}>${escapeHTML(item.serial)} · ${escapeHTML(item.received_on || "date unknown")}${item.status === "absent" ? " · Not in latest inventory" : ""}</option>`).join("")}`;
+        const showSerialFields = () => {
+          const groups = new Map(saleGroups().map(group => [group.barcode, group]));
+          form.querySelectorAll(".sale-row").forEach(row => {
+            const product = resolve(row.querySelector('[name="product"]').value);
+            const stock = product && inventoryStockFor(saleBranch, product.barcode);
+            const group = groups.get(product?.barcode);
+            const qty = group?.qty || 0;
+            const host = row.querySelector(".sale-inventory-serials");
+            host.hidden = Boolean(group && group.row !== row);
+            if (host.hidden) {
+              host.replaceChildren();
+              delete host.dataset.key;
+              return;
+            }
+            const selected = serials.get(product?.barcode) || [];
+            const manual = manualModes.has(product?.barcode);
+            const key = `${product?.barcode}:${qty}:${manual}:${selected.join("|")}`;
+            if (host.dataset.key === key) return;
+            host.dataset.key = key;
+            host.innerHTML = manual ? `<div class="manual-sale-serials">${Array.from({ length: Number.isInteger(qty) && qty > 0 ? Math.min(qty, 1000) : 0 }, (_, index) =>
+              `<label class="field"><span>Serial number · unit ${index + 1}</span><input data-manual-serial="${index}" data-barcode="${escapeHTML(product.barcode)}" list="manual-options-${escapeHTML(product.barcode)}" autocomplete="off" required value="${escapeHTML(selected[index] || "")}"></label>`).join("")}
+              <datalist id="manual-options-${escapeHTML(product.barcode)}">${inventorySaleUnitsFor(saleBranch, product.barcode, sale?.id).map(unit => `<option value="${escapeHTML(unit.serial)}"></option>`).join("")}</datalist>
+              <label class="check-row"><input type="checkbox" data-confirm-manual required> I confirm any missing serials are from a late sale and were not included in the imported inventory.</label>
+              <small>Missing serials are recorded for this sale only, without deducting current stock. Listed serials follow normal stock rules.</small></div>`
+              : stock?.serialized ? (qty === 1
+              ? `<label class="field"><span>Available serial number</span><select data-sale-serial="${escapeHTML(product.barcode)}" required>${serialOptions(product.barcode, selected[0])}</select></label>`
+              : `<button class="button button-outline button-small" type="button" data-select-serials="${escapeHTML(product.barcode)}">Choose ${qty} serial numbers (${selected.slice(0, qty).filter(Boolean).length} selected)</button>`) + `<small class="sale-stock-quantity">Available: ${stock.quantity} · current inventory${inventorySaleUnitsFor(saleBranch, product.barcode, sale?.id).some(item => item.status === "absent") ? " · retained serials are for late sales only" : ""}</small>`
+              : `<small>${product ? stock ? `Available: ${stock.quantity} · no serial required` : "Inventory not initialized for this product" : ""}</small>`;
+            if (product) host.insertAdjacentHTML("beforeend", `<label class="check-row manual-sale-toggle"><input type="checkbox" data-manual-mode="${escapeHTML(product.barcode)}" ${manual ? "checked" : ""}> Enter a missing serial manually</label>`);
+          });
+        };
+        showSerialFields();
+        const stockState = (product, quantity) => manualModes.has(product.barcode)
+          ? { blocked: false, warning: "" } : window.BranchlineDelivery.availability(
+          inventoryStockFor(saleBranch, product.barcode), inventorySaleUnitsFor(saleBranch, product.barcode, sale?.id), quantity,
+          sale ? lines.filter(line => line.barcode === product.barcode).reduce((sum, line) => sum + Number(line.quantity || 0), 0) : 0);
+        const notifyAvailability = (row, force = false) => {
+          const product = resolve(row.querySelector('[name="product"]').value);
+          if (!product) { delete row.dataset.stockNotice; return; }
+          const quantity = saleGroups().find(group => group.barcode === product.barcode)?.qty;
+          if (!Number.isInteger(quantity) || quantity < 1) return;
+          const state = stockState(product, quantity);
+          const notice = `${product.barcode}:${quantity}:${state.warning}`;
+          if (!force && row.dataset.stockNotice === notice) return;
+          row.dataset.stockNotice = notice;
+          if (!state.warning) return;
+          const pop = document.createElement("div");
+          pop.className = "serial-pop stock-notice";
+          pop.innerHTML = `<div class="serial-card stock-notice-card" role="dialog" aria-modal="true" aria-label="Item availability" aria-describedby="stock-notice-message" tabindex="-1"><h3>${state.blocked ? "Item unavailable" : "Check item availability"}</h3><p class="stock-notice-product">${escapeHTML(product.model_description)}</p><p id="stock-notice-message">${escapeHTML(state.warning)}</p><div class="stock-notice-actions"><button class="button button-primary" type="button" data-stock-dismiss>OK</button></div></div>`;
+          const dismiss = () => { pop.remove(); row.querySelector('[name="product"]').focus(); };
+          pop.addEventListener("click", event => { if (event.target.closest("[data-stock-dismiss]")) dismiss(); });
+          pop.addEventListener("keydown", event => {
+            if (event.key === "Escape") { event.stopPropagation(); dismiss(); }
+            if (event.key === "Tab") { event.preventDefault(); pop.querySelector("button").focus(); }
+          });
+          form.closest(".dlg-backdrop").querySelectorAll('[aria-label="Item availability"]').forEach(el => el.parentElement.remove());
+          form.closest(".dlg-backdrop").appendChild(pop);
+          pop.querySelector("button").focus();
+        };
+        form.addEventListener("submit", event => {
+          const blocked = saleGroups().find(group => stockState(group.product, group.qty).blocked);
+          if (!blocked) return;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          notifyAvailability(blocked.row, true);
+        }, { capture: true });
+        let places = [];
+        let placeCode = "";
+        const cityBox = form.elements.city;
+        const brgyBox = form.elements.barangay;
+        const fillBarangays = async () => {
+          const match = places.find(([, label]) => label.toLowerCase() === cityBox.value.trim().toLowerCase());
+          if (!match || match[0] === placeCode) return;
+          placeCode = match[0];
+          try {
+            const names = await loadBarangays(match[0]);
+            form.querySelector("#sale-barangays").innerHTML = names.map(name => `<option value="${escapeHTML(name)}"></option>`).join("");
+            brgyBox.placeholder = "Start typing a barangay";
+          } catch { /* barangay can still be typed */ }
+        };
+        loadPlaces().then(list => { places = list; return fillBarangays(); }).catch(() => {
+          cityBox.placeholder = "Type the city or town";
+        });
+        cityBox.addEventListener("input", () => {
+          const query = cityBox.value.trim().toLowerCase();
+          form.querySelector("#sale-cities").innerHTML = query.length < 2 ? "" : places
+            .filter(([, label]) => label.toLowerCase().includes(query)).slice(0, 30)
+            .map(([, label]) => `<option value="${escapeHTML(label)}"></option>`).join("");
+          fillBarangays();
+        });
+        cityBox.addEventListener("change", fillBarangays);
+        form.addEventListener("change", event => {
+          if (event.target.matches("[data-manual-mode]")) {
+            const code = event.target.dataset.manualMode;
+            if (event.target.checked) manualModes.add(code); else manualModes.delete(code);
+            showSerialFields();
+            return;
+          }
+          const select = event.target.closest("[data-sale-serial]");
+          if (select) serials.set(select.dataset.saleSerial, [select.value]);
+        });
+        form.addEventListener("click", event => {
+          const button = event.target.closest("[data-select-serials]");
+          if (!button) return;
+          const barcode = button.dataset.selectSerials;
+          const qty = saleGroups().find(group => group.barcode === barcode).qty;
+          const pop = document.createElement("div");
+          pop.className = "serial-pop";
+          pop.innerHTML = `<div class="serial-card" role="dialog" aria-modal="true" aria-label="Choose available serials"><h3>${escapeHTML(barcode)} · choose ${qty} serials</h3>
+            ${Array.from({ length: qty }, (_, index) => `<label class="field"><span>Unit ${index + 1}</span><select>${serialOptions(barcode, serials.get(barcode)?.[index])}</select></label>`).join("")}
+            <p class="dlg-error" hidden></p><div class="dlg-actions"><button type="button" class="button" data-serial-cancel>Cancel</button><button type="button" class="button button-primary" data-serial-save>Use selected serials</button></div></div>`;
+          form.closest(".dlg-backdrop").appendChild(pop);
+          pop.addEventListener("click", click => {
+            if (click.target === pop || click.target.closest("[data-serial-cancel]")) return pop.remove();
+            if (!click.target.closest("[data-serial-save]")) return;
+            const values = [...pop.querySelectorAll("select")].map(select => select.value);
+            if (values.some(value => !value) || new Set(values).size !== qty) {
+              const error = pop.querySelector(".dlg-error"); error.hidden = false; error.textContent = "Select a different available serial for each unit."; return;
+            }
+            serials.set(barcode, values); pop.remove(); showSerialFields();
+          });
+          pop.addEventListener("keydown", key => { if (key.key === "Escape") { key.stopPropagation(); pop.remove(); } });
+          pop.querySelector("select")?.focus();
+        });
+        form.serialPayload = () => saleGroups().flatMap(group =>
+          inventoryStockFor(saleBranch, group.barcode)?.serialized || manualModes.has(group.barcode)
+            ? (serials.get(group.barcode) || []).slice(0, group.qty).filter(Boolean).map(serial => ({ barcode: group.barcode, serial,
+              manual: manualModes.has(group.barcode) && !inventorySaleUnitsFor(saleBranch, group.barcode, sale?.id).some(unit => unit.serial === serial) })) : []);
+        form.manualModes = manualModes;
+        form.saleGroups = saleGroups;
+        const enableCurrencyInput = row => {
+          ["price", "srp"].forEach(name => {
+            const input = row.querySelector(`[name="${name}"]`);
+            input.type = "text";
+            input.inputMode = "decimal";
+            input.value = formatCurrencyInput(input.value);
+          });
+        };
+        form.querySelectorAll(".sale-row").forEach(enableCurrencyInput);
+        const recalc = () => {
+          let grand = 0;
+          form.querySelectorAll(".sale-row").forEach(row => {
+            const product = resolve(row.querySelector('[name="product"]').value);
+            row.querySelector('[name="code"]').value = product ? product.barcode : "";
+            // Fill the SRP when a different product is picked; the PS can then still change it.
+            const picked = product ? product.barcode : "";
+            if (row.dataset.srpFor !== picked) {
+              row.dataset.srpFor = picked;
+              row.querySelector('[name="srp"]').value = product && product.srp != null ? formatCurrencyInput(product.srp) : "";
+            }
+            const price = parseCurrency(row.querySelector('[name="price"]').value);
+            const total = !product || price === null ? 0 : price * Number(row.querySelector('[name="quantity"]').value || 0);
+            row.querySelector('[name="linetotal"]').value = price !== null && total ? formatMoney(total) : "";
+            grand += total;
+          });
+          const bundlePrices = [...form.querySelectorAll('[name="bundle_price"]')].map(input => parseCurrency(input.value));
+          form.querySelector("#sale-total").textContent = bundlePrices.includes(null)
+            ? "Enter bundle price" : formatMoney(grand + bundlePrices.reduce((sum, price) => sum + price, 0));
+          showSerialFields();
+        };
+        let availablePromotions = [];
+        const promotionLabel = promotionChoiceLabel;
+        const applicablePromotions = () => availablePromotions.filter(item => {
+          const date = form.elements.date.value;
+          return !date || ((!item.valid_from || date >= item.valid_from) && (!item.valid_to || date <= item.valid_to));
+        });
+        const promotionChoices = value => {
+          if (!value) return [];
+          const choices = applicablePromotions();
+          const selected = choices.find(item => promotionLabel(item).toLowerCase() === value.toLowerCase());
+          if (selected) return [selected];
+          if (resolve(value)) return [];
+          return choices.filter(item => item.barcode === normBarcode(value));
+        };
+        if (!demoStore && (sale || test || currentProfile?.role === "ps")) {
+          const lookupClient = client, profileId = currentProfile.id;
+          fetchAllFrom(lookupClient, "reviewed_promotions", "*", [["reviewed_at", false], ["id", true]],
+            query => query.eq("branch_id", saleBranch).is("revoked_at", null)).then(result => {
+            if (!form.isConnected) return;
+            if (result.error) throw result.error;
+            if (client !== lookupClient || currentProfile?.id !== profileId) throw new Error("The account changed. Reopen the sale.");
+            availablePromotions = result.data;
+            const activeInput = form.ownerDocument.activeElement;
+            if (form.contains(activeInput) && activeInput.name === "product") activeInput.dispatchEvent(new Event("input", { bubbles: true }));
+          }).catch(error => {
+            if (!form.isConnected) return;
+            console.error("Promotion search failed.", error);
+            form.querySelector("[data-sale-promotion-status]").textContent = `Unable to load promotion barcodes: ${friendlyError(error)}`;
+          });
+        }
+        const activatePromotion = (item, row) => {
+          const message = form.querySelector("[data-sale-promotion-status]");
+          if (promotionGroups.size >= 50) throw new Error("An invoice can contain up to 50 bundles.");
+          const quantities = new Map();
+          for (const part of item.components) quantities.set(part.barcode, (quantities.get(part.barcode) || 0) + part.quantity);
+          const components = [...quantities].map(([barcode, quantity]) => {
+            const product = catalog.find(entry => entry.barcode === barcode);
+            if (!product) throw new Error(`Promotion product ${barcode} is unavailable. Ask a manager to review it.`);
+            return { barcode, quantity, srp: product.srp, selling_price: 0 };
+          });
+          if (!components.length) throw new Error("This promotion has no reviewed products.");
+          if (row.dataset.outdoorRow) form.querySelector(`[data-outdoor-of="${row.dataset.outdoorRow}"]`)?.remove();
+          const group = ++nextPromotionGroup;
+          promotionGroups.set(group, item);
+          row.dataset.promotionGroup = group;
+          row.insertAdjacentHTML("beforebegin", promotionHeader(item, group) + components.map(renderLine).join(""));
+          const inserted = [];
+          let previous = row.previousElementSibling;
+          while (previous && !previous.hasAttribute("data-promotion-header")) { inserted.unshift(previous); previous = previous.previousElementSibling; }
+          row.remove();
+          for (const component of inserted) {
+            markPromotionComponent(component, group);
+            enableCurrencyInput(component);
+          }
+          message.textContent = "";
+          recalc();
+        };
+        let linkSeq = 0;
+        const syncOutdoor = row => {
+          const typed = row.querySelector('[name="product"]');
+          const product = resolve(typed.value);
+          const linked = row.dataset.outdoorRow ? form.querySelector(`[data-outdoor-of="${row.dataset.outdoorRow}"]`) : null;
+          if (linked && (!product || row.dataset.outdoorFor !== product.barcode)) {
+            linked.remove();
+            delete row.dataset.outdoorRow;
+            delete row.dataset.outdoorFor;
+          }
+          if (!product || row.dataset.outdoorOf || row.dataset.outdoorFor === product.barcode || !isIndoorSplit(product)) return;
+          const partner = findOutdoorPartner(product, catalog);
+          row.dataset.outdoorFor = product.barcode;
+          if (!partner || [...form.querySelectorAll('[name="code"]')].some(input => input.value === partner.barcode)) return;
+          const id = String(++linkSeq);
+          row.dataset.outdoorRow = id;
+          row.insertAdjacentHTML("afterend", renderLine({ barcode: partner.barcode, selling_price: 0, srp: partner.srp, quantity: row.querySelector('[name="quantity"]').value || 1 }));
+          const added = row.nextElementSibling;
+          added.dataset.outdoorOf = id;
+          enableCurrencyInput(added);
+        };
+        form.addEventListener("input", event => {
+          if (event.target.matches("[data-manual-serial]")) {
+            const values = serials.get(event.target.dataset.barcode) || [];
+            values[Number(event.target.dataset.manualSerial)] = event.target.value.trim();
+            serials.set(event.target.dataset.barcode, values);
+            event.target.closest(".manual-sale-serials").querySelector("[data-confirm-manual]").checked = false;
+            return;
+          }
+          if (event.target.matches("[data-sale-serial]")) {
+            serials.set(event.target.dataset.saleSerial, [event.target.value]);
+            return;
+          }
+          if (event.target.name === "product") {
+            event.target.setCustomValidity("");
+            const search = event.target.value.trim().toLowerCase();
+            const promoOptions = search ? applicablePromotions().filter(item => `${item.barcode} ${item.description}`.toLowerCase().includes(search)
+              || item.barcode === normBarcode(search)).slice(0, 30) : [];
+            form.querySelector("#sale-products").innerHTML = promoOptions.map(item => `<option value="${escapeHTML(promotionLabel(item))}"></option>`).join("") +
+              productSuggestions(event.target.value, item => form.elements.show_unavailable.checked || !stockState(item, 1).blocked, catalog)
+                .map(item => `<option value="${escapeHTML(productLabel(item))}"></option>`).join("");
+            const row = event.target.closest(".sale-row");
+            const exact = promotionChoices(search);
+            if (exact.length > 1) event.target.setCustomValidity("Choose a specific promotion from the suggestions, including its price and source.");
+            const exactPromotion = exact.length > 0;
+            if (!exactPromotion) {
+              syncOutdoor(row);
+              notifyAvailability(row);
+              if (row.dataset.outdoorRow) notifyAvailability(form.querySelector(`[data-outdoor-of="${row.dataset.outdoorRow}"]`));
+            }
+          }
+          if (event.target.name === "quantity") {
+            const row = event.target.closest(".sale-row");
+            const linked = row.dataset.outdoorRow ? form.querySelector(`[data-outdoor-of="${row.dataset.outdoorRow}"] [name="quantity"]`) : null;
+            if (linked) linked.value = event.target.value;
+            notifyAvailability(row);
+            if (linked) notifyAvailability(linked.closest(".sale-row"));
+          }
+          recalc();
+        });
+        form.addEventListener("change", event => {
+          if (event.target.name === "product") {
+            const row = event.target.closest(".sale-row");
+            if (!row || row.dataset.promotionGroup) return;
+            const value = event.target.value.trim();
+            const exact = promotionChoices(value);
+            if (exact.length === 1) {
+              try { activatePromotion(exact[0], row); }
+              catch (error) {
+                event.target.setCustomValidity(error.message);
+                form.querySelector("[data-sale-promotion-status]").textContent = error.message;
+                recalc();
+              }
+              return;
+            }
+            if (exact.length > 1) {
+              const warning = "Choose a specific promotion from the suggestions, including its price and source.";
+              event.target.setCustomValidity(warning);
+              form.querySelector("[data-sale-promotion-status]").textContent = warning;
+            }
+          }
+          if (["product", "quantity"].includes(event.target.name)) notifyAvailability(event.target.closest(".sale-row"));
+        });
+        form.addEventListener("keydown", event => {
+          if (event.key !== "Enter" || event.target.name !== "product" || event.target.readOnly) return;
+          const value = event.target.value.trim();
+          if (promotionChoices(value).length) {
+            event.preventDefault();
+            event.target.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        });
+        form.addEventListener("focusout", event => {
+          if (event.target.name === "price" || event.target.name === "srp") {
+            event.target.value = formatCurrencyInput(event.target.value);
+          }
+        });
+        form.addEventListener("click", event => {
+          const bundleRemove = event.target.closest("[data-remove-promotion]");
+          if (bundleRemove) {
+            const header = bundleRemove.closest("[data-promotion-header]");
+            const group = header.dataset.promotionHeader;
+            form.querySelectorAll(`[data-promotion-group="${group}"]`).forEach(row => row.remove());
+            promotionGroups.delete(Number(group));
+            header.remove();
+            if (!form.querySelector(".sale-row")) {
+              form.querySelector("#sale-rows").insertAdjacentHTML("beforeend", renderLine());
+              enableCurrencyInput(form.querySelector(".sale-row:last-child"));
+            }
+            form.querySelector("[data-sale-promotion-status]").textContent = "";
+            recalc();
+            return;
+          }
+          if (event.target.closest("[data-add-line]")) {
+            form.querySelector("#sale-rows").insertAdjacentHTML("beforeend", renderLine());
+            enableCurrencyInput(form.querySelector(".sale-row:last-child"));
+            showSerialFields();
+          }
+          const remove = event.target.closest("[data-remove-line]");
+          if (remove && form.querySelectorAll(".sale-row").length > (remove.closest(".sale-row").dataset.outdoorRow ? 2 : 1)) {
+            const row = remove.closest(".sale-row");
+            if (row.dataset.outdoorRow) form.querySelector(`[data-outdoor-of="${row.dataset.outdoorRow}"]`)?.remove();
+            row.remove();
+            recalc();
+          }
+        });
+        recalc();
+      },
+      onSubmit: async form => {
+        if (test && (currentProfile?.id !== test.accountId || currentProfile.role !== "admin")) {
+          throw new Error("The account changed. Reopen Record Sale.");
+        }
+        if (!form.elements.city.value.trim() || !form.elements.barangay.value.trim()) throw new Error("City / municipality and barangay are required.");
+        const method = form.elements.fulfillment.value || null;
+        const feeText = form.elements.dg_amount.value.trim();
+        const fee = method === "delivery" && feeText !== "" ? Number(feeText) : null;
+        window.BranchlineDelivery.validate(method, fee, !!sale && !sale.fulfillment_method);
+        const rows = [...form.querySelectorAll(".sale-row")].map(row => {
+          const product = resolve(row.querySelector('[name="product"]').value);
+          if (!product) throw new Error("Pick each product from the suggestions (or type its exact barcode).");
+          const srpInput = row.querySelector('[name="srp"]').value.trim();
+          const srp = srpInput === "" ? null : parseCurrency(srpInput);
+          if (srp === null || srp < 0) throw new Error("Enter an SRP for every product. Use a valid non-negative amount.");
+          return {
+            barcode: product.barcode,
+            srp,
+            selling_price: parseCurrency(row.querySelector('[name="price"]').value),
+            quantity: Number(row.querySelector('[name="quantity"]').value),
+            promotion_component: Boolean(row.dataset.promotionGroup),
+          };
+        });
+        if (rows.some(line => line.selling_price === null || line.selling_price < 0 || !Number.isInteger(line.quantity) || line.quantity < 1)) {
+          throw new Error("Enter a valid non-negative price and a whole-number quantity for each product.");
+        }
+        const regularLines = rows.filter(row => !row.promotion_component).map(({ promotion_component, ...row }) => row);
+        if (new Set(regularLines.map(row => row.barcode)).size !== regularLines.length) throw new Error("Use one item line per barcode and increase its quantity instead of repeating the product.");
+        if (liveData.inventoryError) throw new Error(liveData.inventoryError);
+        const serialPayload = form.serialPayload();
+        const groups = form.saleGroups();
+        for (const { barcode, qty } of groups) {
+          const stock = inventoryStockFor(saleBranch, barcode);
+          const manual = form.manualModes.has(barcode);
+          if (manual || stock?.serialized) {
+            const selected = serialPayload.filter(unit => unit.barcode === barcode);
+            if (selected.length !== qty || new Set(selected.map(unit => unit.serial.toLowerCase())).size !== qty) {
+              throw new Error(`${barcode}: Choose one different serial number for each unit.`);
+            }
+            if (manual) continue;
+          }
+          const previousQuantity = sale ? lines.filter(line => line.barcode === barcode).reduce((sum, line) => sum + Number(line.quantity || 0), 0) : 0;
+          const state = window.BranchlineDelivery.availability(stock,
+            inventorySaleUnitsFor(saleBranch, barcode, sale?.id), qty, previousQuantity);
+          if (state.blocked) throw new Error(`${barcode}: ${state.warning}`);
+        }
+        const common = {
+          p_fulfillment_method: method,
+          p_dg_amount: fee,
+          p_customer_name: uppercaseEntry(canonicalCustomer({ branch_id: saleBranch, customer_name: form.elements.customer.value }).name),
+          p_invoice_number: form.elements.invoice.value.trim(),
+          p_sold_on: form.elements.date.value,
+          p_payment_mode: form.elements.payment.value,
+          p_city: uppercaseEntry(form.elements.city.value),
+          p_barangay: uppercaseEntry(form.elements.barangay.value),
+          p_serials: serialPayload,
+        };
+        const bundles = [...form.querySelectorAll("[data-promotion-header]")].map(header => {
+          const item = promotionGroups.get(Number(header.dataset.promotionHeader));
+          if ((item.valid_from && common.p_sold_on < item.valid_from) || (item.valid_to && common.p_sold_on > item.valid_to)) {
+            throw new Error(`Promotion ${item.barcode} is unavailable on the sale date.`);
+          }
+          const total = parseCurrency(header.querySelector('[name="bundle_price"]').value);
+          if (total === null || total < 0) throw new Error("Enter a valid non-negative selling price for each bundle.");
+          return { promotion: item.id, bundle_total: total, ...(item.savedGroupId ? { group_id: item.savedGroupId } : {}),
+            acknowledge_warnings: Boolean(header.querySelector('[name="confirm_promotion_warning"]')?.checked) };
+        });
+        if (test) {
+          const total = regularLines.reduce((sum, row) => sum + row.selling_price * row.quantity, 0) +
+            bundles.reduce((sum, bundle) => sum + bundle.bundle_total, 0);
+          return `<p role="status"><strong>Test sale validated</strong> · ${escapeHTML(test.branch.name)} · ${formatMoney(total)}</p>
+            <ul>${groups.map(({ product, qty }) => `<li>${qty} × ${escapeHTML(productLabel(product))}</li>`).join("")}</ul>`;
+        }
+        if (savedPromotions.length) {
+          mustRpc(await client.rpc("update_bundle_sale", {
+            ...common, p_sale_id: sale.id, p_expected_updated_at: sale.updated_at,
+            p_bundles: bundles, p_regular_lines: regularLines, p_reconcile: Boolean(form.elements.reconcile.checked),
+          }));
+        } else if (sale && bundles.length) {
+          mustRpc(await client.rpc("edit_sale_with_promotions", {
+            ...common, p_sale_id: sale.id, p_bundles: bundles, p_regular_lines: regularLines,
+            p_reconcile: Boolean(form.elements.reconcile.checked),
+          }));
+        } else if (bundles.length) {
+          if (bundles.length === 1) {
+            const [bundle] = bundles;
+            mustRpc(await client.rpc("save_promotion_sale", {
+              ...common, p_promotion: bundle.promotion, p_bundle_total: bundle.bundle_total,
+              p_acknowledge_warnings: bundle.acknowledge_warnings, p_regular_lines: regularLines,
+            }));
+          } else {
+            mustRpc(await client.rpc("save_promotion_sales", { ...common, p_bundles: bundles, p_regular_lines: regularLines }));
+          }
+        } else {
+          mustRpc(await client.rpc("save_sale_with_delivery", {
+            ...common, p_lines: regularLines, p_sale_id: sale ? sale.id : null,
+            p_reconcile: Boolean(form.elements.reconcile?.checked),
+          }));
+        }
+        activePage = "sales";
+        await refreshData();
+      },
+    });
+  }
+
+  function renderTargetsPage() {
+    mountPage(
+      pageHeading("Targets", "Branch and brand targets for your scope. Use Set target to add or change them. Payment mix results are under Analytics."),
+      "",
+      filterBar({
+        district: true,
+        branch: true,
+        period: true,
+        search: "Search branch",
+        actions: `${canSetPaymentTargets() ? '<button class="button button-outline" type="button" data-open="payment-targets">Set mix targets</button>' : ""}<button class="button button-outline" type="button" data-open="targets-bulk">+ Add multiple targets</button><button class="button button-primary" type="button" data-open="target">+ Set target</button>`,
+      }),
+      () => {
+        const ids = scopeBranchIds();
+        const query = searchQuery();
+        const actualByBranchMonth = new Map();
+        withHistoryFacts(analyticsFacts(ids), ids, false).forEach(fact => addTo(actualByBranchMonth, `${fact.branchId}|${fact.date.slice(0, 7)}`, fact.amount));
+        const targets = liveData.targets
+          .filter(target => ids.has(target.branch_id) && targetInPeriod(target.month) && matches(query, branchName(target.branch_id)))
+          .map(target => ({
+            target,
+            branch: branchName(target.branch_id),
+            district: branchDistrictName(target.branch_id),
+            month: target.month.slice(0, 7),
+            amount: Number(target.amount),
+            actual: actualByBranchMonth.get(`${target.branch_id}|${target.month.slice(0, 7)}`) || 0,
+          }))
+          .sort((a, b) => natural(a.district, b.district) || natural(a.branch, b.branch) || b.month.localeCompare(a.month));
+        const scope = statusLabel();
+        return `${panel("Monthly branch targets", "Ordered by district, then branch.", tableBlock(
+          "targets",
+          ["District", "Branch", "Month", "Target", "Actual sales", "Progress", ""],
+          targets,
+          row => `<tr><td>${escapeHTML(row.district)}</td><td><strong>${escapeHTML(row.branch)}</strong></td><td>${escapeHTML(monthLabel(row.month))}</td><td>${formatMoney(row.amount)}</td><td>${formatMoney(row.actual)}</td><td>${percent(row.actual, row.amount)}</td><td><button class="button button-outline button-small" type="button" data-edit-target="${escapeHTML(row.target.id)}">Edit</button></td></tr>`,
+          "No targets match these filters.",
+        ))}
+        ${panel("Brand performance", `${scope} · click a heading to sort.`, brandTable(brandRows(panelIds("brandBranch", scopeBranchIds())), "No brand sales or targets for this selection."), brandPanelControl())}
+        ${psRankingPanel()}`;
+      },
+    );
+  }
+
+  function renderProductsPage() {
+    mountPage(
+      pageHeading("Products", "Shared product catalog used by all branches."),
+      "",
+      filterBar({
+        search: "Brand, description or barcode",
+        actions: [
+          '<button class="button button-primary" type="button" data-open="product">+ Add product</button>',
+          currentProfile.role === "admin" ? '<button class="button button-outline" type="button" data-open="sync-categories">Update sales categories</button>' : "",
+          currentProfile.role === "admin" ? '<button class="button button-outline" type="button" data-open="payments">Payment modes</button>' : "",
+        ].join(""),
+      }),
+      () => {
+        const query = searchQuery();
+        const seen = new Set();
+        const products = liveData.products
+          .filter(product => {
+            const key = product.barcode.trim().toLowerCase();
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          })
+          .filter(product => matches(query, product.brand, product.category, product.sub_category, product.model_description, product.barcode))
+          .sort((a, b) => natural(a.brand, b.brand) || natural(a.model_description, b.model_description));
+        productsFiltered = products.map(product => product.barcode.trim().toLowerCase());
+        const visibleKeys = new Set(productsFiltered);
+        [...productSelection].forEach(key => { if (!visibleKeys.has(key)) productSelection.delete(key); });
+        const isAdminUser = currentProfile.role === "admin";
+        const picked = productSelection.size;
+        const deleteButton = isAdminUser
+          ? `<button class="button button-outline button-small danger" type="button" data-delete-products ${picked ? "" : "disabled"}>Delete selected${picked ? ` (${picked})` : ""}</button>`
+          : "";
+        return panel("Product catalog", `Alphabetical by brand, then description. Click a heading to sort.${isAdminUser ? ` ${picked} of ${products.length} selected.` : ""}`, tableBlock(
+          "products",
+          [...(isAdminUser ? [SELECT_HEADER] : []), "Brand", "Category", "Sub-category", "Description", "Barcode", "SRP", ""],
+          products,
+          product => `<tr>${isAdminUser ? `<td class="select-cell"><input type="checkbox" data-product-select="${escapeHTML(product.barcode.trim().toLowerCase())}" ${productSelection.has(product.barcode.trim().toLowerCase()) ? "checked" : ""} aria-label="Select ${escapeHTML(product.model_description)}"></td>` : ""}<td><strong>${escapeHTML(product.brand)}</strong></td><td>${escapeHTML(product.category || "—")}</td><td>${escapeHTML(product.sub_category || "—")}</td><td>${escapeHTML(product.model_description)}</td><td>${escapeHTML(product.barcode)}</td><td>${product.srp == null ? "—" : formatMoney(product.srp)}</td><td class="manage-cell"><button class="button button-outline button-small" type="button" data-edit-product="${escapeHTML(product.barcode)}">Edit</button></td></tr>`,
+          "No products match your search.",
+          PAGE_SIZE, (product,col) => [product.brand,product.category || "—",product.sub_category || "—",
+            product.model_description,product.barcode,product.srp == null ? "—" : product.srp][col - (isAdminUser ? 1 : 0)],
+        ), deleteButton);
+      },
+    );
+  }
+
+  const customerColumns = ["Customer", "Barangay", "City", "Branch"];
+
+  function customerIdentityText(value) {
+    return String(value ?? "").normalize("NFKC").trim().replace(/[’']/g, "").replace(/\s+/g, " ").toLowerCase();
+  }
+
+  async function loadCustomerMasterAliases(workspaceClient) {
+    const result = await fetchAllFrom(workspaceClient, "customer_master_aliases",
+      "branch_id,identity_key,customer_master_records(name,barangay,city)",
+      [["branch_id", true], ["identity_key", true]]);
+    if (result.error) return { aliases: new Map(), error: "Could not load Customer Master updates. Refresh to try again." };
+    return { aliases: new Map((result.data || []).map(row =>
+      [JSON.stringify([row.branch_id, ...row.identity_key]), row.customer_master_records])), error: "" };
+  }
+
+  function canonicalCustomer(sale) {
+    const name = String(sale.customer_name ?? "").trim();
+    const branch = liveData.branches.find(item => item.id === sale.branch_id);
+    const knownSantiagoAlias = branch?.code === "STG" && [
+      "jelos", "jelos airconditioning and refrigeration", "jelos airconditioning and refrigerator",
+    ].includes(customerIdentityText(name));
+    const base = knownSantiagoAlias ? { name: "Jelo’s Airconditioning and Refrigeration", barangay: "Maligaya", city: "Echague, Isabela" }
+      : { name, barangay: String(sale.barangay ?? "").trim(), city: String(sale.city ?? "").trim() };
+    const key = JSON.stringify([sale.branch_id, ...[base.name, base.barangay, base.city].map(customerIdentityText)]);
+    return liveData.customerMaster?.aliases.get(key) || base;
+  }
+
+  function wireSaleCustomerPicker(form, branchId) {
+    const input = form.elements.customer;
+    const list = form.querySelector("#sale-customer-options");
+    const customers = new Map();
+    function addCustomer(sale) {
+      if (!sale.customer_name?.trim()) return;
+      const customer = canonicalCustomer(sale);
+      const key = [customer.name, customer.barangay, customer.city].map(customerIdentityText).join("\0");
+      const prior = customers.get(key);
+      customers.set(key, { ...customer, count: (prior?.count || 0) + 1,
+        last: String(sale.sold_on || "") > (prior?.last || "") ? sale.sold_on : prior?.last || "" });
+    }
+    for (const sale of visibleSales()) {
+      if (sale.branch_id === branchId && !/^RET-/i.test(sale.invoice_number || "")) addCustomer(sale);
+    }
+    let options = [], active = -1;
+    let generation = 0, requestTimer;
+    const hide = () => {
+      list.hidden = true;
+      input.setAttribute("aria-expanded", "false");
+      input.removeAttribute("aria-activedescendant");
+      active = -1;
+    };
+    const close = () => { generation++; clearTimeout(requestTimer); hide(); };
+    const render = (search, found = null) => {
+      const matching = found ?? [...customers.values()].filter(item => customerIdentityText(item.name).includes(search));
+      const hasAddress = new Set(matching.filter(item => item.city || item.barangay).map(item => customerIdentityText(item.name)));
+      options = matching.filter(item => item.city || item.barangay || !hasAddress.has(customerIdentityText(item.name)))
+        .sort((a, b) => Number(customerIdentityText(b.name) === search) - Number(customerIdentityText(a.name) === search) ||
+          Number(Boolean(b.city && b.barangay)) - Number(Boolean(a.city && a.barangay)) ||
+          b.last.localeCompare(a.last) || b.count - a.count || a.name.localeCompare(b.name))
+        .slice(0, 10);
+      if (!options.length) return hide();
+      active = -1;
+      input.removeAttribute("aria-activedescendant");
+      list.innerHTML = options.map((item, index) => `<div role="option" id="sale-customer-option-${index}" data-customer-option="${index}" aria-selected="false"><strong>${escapeHTML(item.name)}</strong>${item.city || item.barangay ? `<small>${escapeHTML([item.barangay, item.city].filter(Boolean).join(", "))}</small>` : ""}</div>`).join("");
+      list.hidden = false;
+      input.setAttribute("aria-expanded", "true");
+    };
+    const show = () => {
+      const search = customerIdentityText(input.value);
+      const request = ++generation;
+      clearTimeout(requestTimer);
+      if (!search) return hide();
+      if (demoStore || currentProfile.role !== "ps" || search.length < 2) return render(search);
+      hide();
+      const searchClient = client, user = currentProfile.id;
+      requestTimer = setTimeout(async () => {
+        const { data, error } = await searchClient.rpc("branch_sale_customer_suggestions", { p_branch: branchId, p_query: search });
+        if (request !== generation || !form.isConnected || client !== searchClient || currentProfile?.id !== user) return;
+        if (error) return render(search);
+        render(search, (data || []).map(row => ({ name: titleCase(row.customer_name), barangay: titleCase(row.barangay),
+          city: titleCase(row.city), last: row.sold_on || "", count: 1 })));
+      }, 200);
+    };
+    const select = index => {
+      const item = options[index];
+      if (!item) return;
+      input.value = item.name;
+      form.elements.city.value = item.city;
+      form.elements.barangay.value = item.barangay;
+      form.elements.city.dispatchEvent(new Event("change", { bubbles: true }));
+      close();
+    };
+    input.addEventListener("input", show);
+    input.addEventListener("focus", show);
+    input.addEventListener("blur", close);
+    list.addEventListener("pointerdown", event => {
+      const option = event.target.closest("[data-customer-option]");
+      if (!option) return;
+      event.preventDefault();
+      select(Number(option.dataset.customerOption));
+    });
+    input.addEventListener("keydown", event => {
+      if (list.hidden) return;
+      if (event.key === "Escape") { event.stopPropagation(); close(); }
+      if (event.key === "Enter" && active >= 0) { event.preventDefault(); select(active); }
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      event.preventDefault();
+      active = active < 0 && event.key === "ArrowUp" ? options.length - 1
+        : (active + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+      [...list.children].forEach((option, index) => option.setAttribute("aria-selected", String(index === active)));
+      const selected = list.children[active];
+      input.setAttribute("aria-activedescendant", selected.id);
+      selected.scrollIntoView({ block: "nearest" });
+    });
+  }
+
+  function customerRows() {
+    const ids = scopeBranchIds();
+    const customers = new Map();
+    for (const sale of visibleSales()) {
+      if (!ids.has(sale.branch_id) || !sale.customer_name?.trim()) continue;
+      const customer = canonicalCustomer(sale);
+      const identity = [customer.name, customer.barangay, customer.city].map(customerIdentityText);
+      const key = JSON.stringify([sale.branch_id, ...identity]);
+      const row = customers.get(key) ?? { key, branchId: sale.branch_id, customer, values: [customer.name, customer.barangay || "—",
+        customer.city || "—", branchName(sale.branch_id)], sales: [], hasPurchase: false };
+      row.sales.push(sale);
+      row.hasPurchase ||= !/^RET-/i.test(sale.invoice_number || "");
+      customers.set(key, row);
+    }
+    return [...customers.values()].filter(row => row.hasPurchase)
+      .sort((a, b) => natural(a.values[0], b.values[0]) || natural(a.values[3], b.values[3]));
+  }
+
+  function renderCustomersPage() {
+    mountPage(
+      pageHeading("Customer Master", "Customers recorded in sales within your assigned branches."),
+      "",
+      filterBar({ district: true, branch: true, search: "Customer, barangay, city or branch" }),
+      () => {
+        const search = customerIdentityText(searchQuery());
+        const rows = customerRows().filter(row => matches(search, ...row.values.map(customerIdentityText)) ||
+          row.sales.some(sale => customerIdentityText(sale.customer_name).includes(search)));
+        const rowHtml = row => `<tr class="sale-summary-row" data-customer-history="${escapeHTML(row.key)}" tabindex="0" aria-label="View purchase history for ${escapeHTML(row.values[0])}">${row.values.map(value => `<td>${escapeHTML(value)}</td>`).join("")}${customerEditingEnabled() ? `<td class="customer-master-edit"><button type="button" class="button button-outline button-small" data-customer-edit="${escapeHTML(row.key)}" aria-label="Edit ${escapeHTML(row.values[0])}">Edit</button></td>` : ""}</tr>`;
+        const value = (row, col) => row.values[col];
+        const table = tableBlock("customers", customerEditingEnabled() ? [...customerColumns, ""] : customerColumns, rows, rowHtml, "No customers match your search.", PAGE_SIZE, value, value);
+        return panel("Customers", `${tableStore.customers.items.length} matching records. Choose a customer to view their purchase history. Download includes all filtered pages.`,
+          (liveData.customerMaster?.error ? `<p role="alert" class="connected-error">${escapeHTML(liveData.customerMaster.error)}</p>` : "") + table);
+      },
+    );
+  }
+
+  function customerEditingEnabled() {
+    return Boolean(!demoStore && rolePages[currentProfile?.role]?.includes("customers") && liveData.customerMaster && !liveData.customerMaster.error);
+  }
+
+  function openCustomerEditor(key) {
+    if (activePage !== "customers" || !customerEditingEnabled()) return;
+    const customers = customerRows();
+    const keep = customers.find(row => row.key === key);
+    if (!keep) return;
+    const candidates = customers.filter(row => row.branchId === keep.branchId && row.key !== key);
+    const details = keep.customer;
+    let duplicate = null;
+    const editClient = client, editor = currentProfile.id;
+    openModal({
+      title: `Edit customer · ${details.name}`, intro: `${keep.values[3]} · ${keep.sales.length} transaction(s)`,
+      submitLabel: "Save customer",
+      body: `<div class="dlg-grid">
+        ${fieldHTML("Customer name", "customer_name", `<input name="customer_name" required maxlength="200" value="${escapeHTML(details.name)}">`)}
+        ${fieldHTML("Barangay", "barangay", `<input name="barangay" required maxlength="200" value="${escapeHTML(details.barangay)}">`)}
+        ${fieldHTML("City / municipality", "city", `<input name="city" required maxlength="200" value="${escapeHTML(details.city)}">`)}
+        </div><details class="customer-combine">
+          <summary>Combine purchase histories</summary>
+          <p>Choose a duplicate to bring its purchase history into this customer record.</p>
+          ${fieldHTML("Find a duplicate in this branch", "duplicate_search", '<input name="duplicate_search" type="search" placeholder="Type a customer name" autocomplete="off">')}
+          ${fieldHTML("Duplicate customer", "duplicate", '<select name="duplicate"><option value="">Choose a duplicate</option></select>')}
+          <p data-customer-combine-preview role="status"></p>
+        </details>`,
+      onReady: form => {
+        const search = form.elements.duplicate_search, select = form.elements.duplicate;
+        const preview = form.querySelector("[data-customer-combine-preview]");
+        const submit = form.querySelector('[type="submit"]');
+        const updatePreview = () => {
+          preview.textContent = duplicate
+            ? `Move ${duplicate.sales.length} transaction(s) from ${duplicate.customer.name} into ${form.elements.customer_name.value.trim() || details.name}. Combined history: ${keep.sales.length + duplicate.sales.length} transaction(s).` : "";
+          submit.textContent = duplicate ? "Combine and save" : "Save customer";
+        };
+        const updateChoices = () => {
+          const query = customerIdentityText(search.value);
+          const shown = candidates.filter(row => query && row.values.slice(0, 3).some(value => customerIdentityText(value).includes(query))).slice(0, 30);
+          select.replaceChildren(new Option(shown.length ? "Choose a duplicate" : query ? "No matching customers" : "Type a customer name", ""),
+            ...shown.map(row => new Option(row.values.slice(0, 3).filter(value => value !== "—").join(" · "), row.key)));
+          duplicate = null;
+          updatePreview();
+        };
+        search.addEventListener("input", updateChoices);
+        select.addEventListener("change", () => {
+          duplicate = candidates.find(row => row.key === select.value) || null;
+          updatePreview();
+        });
+        form.elements.customer_name.addEventListener("input", updatePreview);
+        form.querySelector("details").addEventListener("toggle", event => {
+          if (!event.currentTarget.open) { select.value = ""; duplicate = null; updatePreview(); }
+        });
+      },
+      onSubmit: async form => {
+        if (client !== editClient || currentProfile?.id !== editor) throw new Error("The account changed. Reopen Customer Master.");
+        const combining = duplicate;
+        if (!form.elements.barangay.value.trim() || !form.elements.city.value.trim())
+          throw new Error("Barangay and City / municipality are required.");
+        const { error } = await editClient.rpc("update_customer_master", {
+          p_branch: keep.branchId, p_keep: JSON.parse(keep.key).slice(1),
+          p_combine: combining ? JSON.parse(combining.key).slice(1) : null,
+          p_name: form.elements.customer_name.value.trim(),
+          p_barangay: form.elements.barangay.value.trim(), p_city: form.elements.city.value.trim(),
+        });
+        if (error) throw error;
+        const saved = await loadCustomerMasterAliases(editClient);
+        if (client !== editClient || currentProfile?.id !== editor) return false;
+        liveData.customerMaster = saved;
+        refreshResults();
+        return `<p role="status">${saved.error ? "Customer saved. Refresh Customer Master to see the update."
+          : combining ? "Purchase histories combined and customer details saved." : "Customer details saved."}</p>`;
+      },
+    });
+  }
+
+  let columnMenu;
+  function closeColumnMenu() {
+    columnMenu?.remove();
+    columnMenu = null;
+  }
+
+  function openColumnMenu(trigger, label, values, selectedValues, onSort, onFilter) {
+    closeColumnMenu();
+    const choices = [...new Set(values.map(filterValue))].sort(natural);
+    const selected = new Set(selectedValues ?? choices);
+    const menu = columnMenu = document.createElement("div");
+    menu.className = "dlg customer-column-menu";
+    menu.setAttribute("popover", "auto");
+    menu.setAttribute("role", "dialog");
+    menu.setAttribute("aria-label", "Sort and filter " + label);
+    menu.innerHTML = `<div class="customer-sort-options"><button type="button" data-column-sort="asc">Sort ascending</button>
+      <button type="button" data-column-sort="desc">Sort descending</button></div>
+      <label class="field"><span>Search values</span><input type="search" autocomplete="off"></label>
+      <label class="check-row"><input type="checkbox" data-column-all> Select all</label>
+      <div class="customer-filter-values"></div>
+      <div class="dlg-actions"><button class="button button-primary button-small" type="button" data-column-apply>Apply</button>
+      <button class="button button-outline button-small" type="button" data-column-cancel>Cancel</button></div>`;
+    document.body.append(menu);
+    menu.addEventListener("toggle", event => { if (event.newState === "closed" && columnMenu === menu) closeColumnMenu(); });
+    const search = menu.querySelector("input[type=search]");
+    const list = menu.querySelector(".customer-filter-values");
+    const all = menu.querySelector("[data-column-all]");
+    const choiceLabel = value => value || "(Blanks)";
+    const shown = () => choices.filter(value => choiceLabel(value).toLowerCase().includes(search.value.trim().toLowerCase()));
+    const syncAll = visible => {
+      const count = visible.filter(value => selected.has(value)).length;
+      all.disabled = !visible.length;
+      all.checked = Boolean(visible.length) && count === visible.length;
+      all.indeterminate = count > 0 && count < visible.length;
+    };
+    let visible = [];
+    const render = () => {
+      visible = shown();
+      list.innerHTML = visible.map((value, index) => `<label class="check-row"><input type="checkbox" data-column-value="${index}"
+        ${selected.has(value) ? "checked" : ""}> <span>${escapeHTML(choiceLabel(value))}</span></label>`).join("") || "<p>No matching values.</p>";
+      syncAll(visible);
+    };
+    const finish = action => { closeColumnMenu(); trigger.focus({ preventScroll: true }); action?.(); };
+    search.addEventListener("input", render);
+    all.addEventListener("change", () => {
+      for (const value of visible) {
+        if (all.checked) selected.add(value);
+        else selected.delete(value);
+      }
+      render();
+    });
+    list.addEventListener("change", event => {
+      const value = visible[Number(event.target.dataset.columnValue)];
+      if (value === undefined) return;
+      if (event.target.checked) selected.add(value);
+      else selected.delete(value);
+      syncAll(visible);
+    });
+    menu.querySelectorAll("[data-column-sort]").forEach(button => button.addEventListener("click", () => finish(() => onSort(button.dataset.columnSort))));
+    menu.querySelector("[data-column-apply]").addEventListener("click", () => finish(() => onFilter(choices.every(value => selected.has(value)) ? null : selected)));
+    menu.querySelector("[data-column-cancel]").addEventListener("click", () => finish());
+    render();
+    menu.showPopover();
+    const position = trigger.getBoundingClientRect();
+    menu.style.left = Math.max(8, Math.min(position.left, innerWidth - menu.offsetWidth - 8)) + "px";
+    menu.style.top = Math.max(8, Math.min(position.bottom + 4, innerHeight - menu.offsetHeight - 8)) + "px";
+    search.focus({ preventScroll: true });
+  }
+
+  function setColumnFilter(filters, col, selection) {
+    if (selection) filters[col] = selection;
+    else delete filters[col];
+  }
+
+  window.BranchlineTableUI?.setColumnMenu?.(openColumnMenu);
+
+  function openTableColumn(trigger, rerender = refreshResults, scope = connectedContent) {
+    const { sortTable: key, sortCol } = trigger.dataset;
+    const table = columnTables.get(key);
+    const col = Number(sortCol);
+    if (!table || !isDataHeader(table.headers[col])) return;
+    const filters = ui.columnFilters[key] ??= {};
+    const values = table.displayValue ? table.items.map(item => table.displayValue(item, col)) :
+      tableCells(table.items, table.rowHtml, [col], true).map(row => row.get(col));
+    const update = () => {
+      const scroll = trigger.closest(".connected-table-wrap")?.scrollLeft ?? 0;
+      ui.pages[key] = 1;
+      rerender();
+      const header = scope.querySelector(`[data-sort-table="${CSS.escape(key)}"][data-sort-col="${col}"]`);
+      if (header) {
+        header.closest(".connected-table-wrap").scrollLeft = scroll;
+        header.focus({ preventScroll: true });
+      }
+    };
+    openColumnMenu(trigger, table.headers[col], values, filters[col],
+      dir => { ui.sort[key] = { col, dir }; update(); },
+      selection => { setColumnFilter(filters, col, selection); update(); });
+  }
+
+  function bindModalTable(host, renderTable) {
+    const render = () => { host.innerHTML = renderTable(); };
+    host.addEventListener("click", event => {
+      const heading = event.target.closest("[data-sort-table]");
+      if (heading) openTableColumn(heading, render, host);
+      const pager = event.target.closest("[data-pager]:not(:disabled)");
+      if (!pager) return;
+      const key = pager.dataset.pager;
+      const page = Number(pager.dataset.page);
+      const direction = page > ui.pages[key] ? 1 : 0;
+      ui.pages[key] = page;
+      render();
+      const buttons = [...host.querySelectorAll("[data-pager]")];
+      const nextFocus = buttons[direction]?.disabled ? buttons[1 - direction] : buttons[direction];
+      nextFocus?.focus({ preventScroll: true });
+    });
+  }
+
+  function openCustomerHistory(key, resume = false) {
+    if (activePage !== "customers" || !rolePages[currentProfile?.role]?.includes("customers")) return;
+    const customer = customerRows().find(row => row.key === key);
+    if (!customer) return;
+    const [name, barangay, city, branch] = customer.values;
+    const purchases = customer.sales.map(sale => ({ sale, amount: saleTotal(sale, "price") }))
+      .sort((a, b) => String(b.sale.sold_on).localeCompare(String(a.sale.sold_on)) ||
+        String(b.sale.created_at || "").localeCompare(String(a.sale.created_at || "")) || natural(b.sale.invoice_number, a.sale.invoice_number));
+    const total = purchases.reduce((sum, purchase) => sum + purchase.amount, 0);
+    const tableKey = "purchase-history";
+    if (!resume) {
+      ui.pages[tableKey] = 1;
+      delete ui.sort[tableKey];
+      delete ui.columnFilters[tableKey];
+    }
+    const renderTable = () => tableBlock(tableKey, ["Date", "Invoice", "Payment", "Total"], purchases,
+      ({ sale, amount }) => `<tr class="sale-summary-row" data-sale-details="${escapeHTML(sale.id)}" tabindex="0" aria-label="View invoice ${escapeHTML(sale.invoice_number)}">
+        <td>${escapeHTML(sale.sold_on)}</td><td><strong>${escapeHTML(sale.invoice_number)}</strong></td>
+        <td>${escapeHTML(sale.payment_mode || "—")}</td><td>${formatMoney(amount)}</td></tr>`,
+      "No transactions match these filters.", PAGE_SIZE, undefined, undefined, { fixedRows: true });
+    openModal({ title: `Purchase History · ${name}`, intro: [barangay, city, branch].filter(value => value !== "—").join(" · "),
+      readOnly: true, wide: true,
+      headerAction: customerEditingEnabled() ? '<button type="button" class="button button-outline button-small" data-edit-customer-history>Edit customer</button>' : "",
+      body: `<div class="sale-detail-total"><span>${purchases.length} recorded transaction${purchases.length === 1 ? "" : "s"}</span>
+        <strong>Overall total: ${formatMoney(total)}</strong></div>
+        <div class="purchase-history-table">${renderTable()}</div>`,
+      onReady: form => {
+        form.closest(".dlg").querySelector("[data-edit-customer-history]")?.addEventListener("click", () => openCustomerEditor(key));
+        bindSaleDetailRows(form, () => openCustomerHistory(key, true));
+        bindModalTable(form.querySelector(".purchase-history-table"), renderTable);
+      },
+    });
+  }
+
+  function renderPeoplePage() {
+    mountPage(
+      pageHeading("People & access", "Create districts and branches first, then add users. A user's role, district, branch and brand decide what they can see."),
+      "",
+      filterBar({
+        district: true,
+        search: "Name, Salesperson Code, role, brand, district or branch",
+        actions: [
+          '<button class="button button-primary" type="button" data-open="user">+ Add user</button>',
+          '<button class="button button-outline" type="button" data-open="users-bulk">+ Add multiple users</button>',
+          '<button class="button button-outline" type="button" data-open="district">+ District</button>',
+          '<button class="button button-outline" type="button" data-open="branch">+ Branch</button>',
+          `<button class="button button-outline" type="button" data-disabled-accounts>${ui.peopleDisabled ? "Active accounts" : `Disabled accounts (${liveData.profiles.filter(person => !person.active).length})`}</button>`,
+        ].join(""),
+      }),
+      () => {
+        const query = searchQuery();
+        const people = liveData.profiles
+          .filter(profile => ui.peopleDisabled ? !profile.active : profile.active)
+          .filter(profile => !ui.district || profile.district_id === ui.district)
+          .map(profile => ({
+            profile,
+            role: roleLabels[profile.role] || profile.role,
+            district: districtName(profile.district_id),
+            branch: profile.branch_id
+              ? branchName(profile.branch_id)
+              : profile.role === "manager"
+                ? liveData.managerLinks.filter(link => link.manager_id === profile.id).map(link => branchName(link.branch_id)).join(", ") || "—"
+                : ["inventory_controller", "stock_custodian"].includes(profile.role)
+                  ? (liveData.inventoryAssignments || []).filter(link => link.user_id === profile.id).map(link => branchName(link.branch_id)).join(", ") || "No assigned branches"
+                  : "—",
+            brand: profile.role === "ps" ? profile.assigned_brand || "—" : "—",
+          }))
+          .filter(row => matches(query, row.profile.full_name, row.profile.salesperson_code, row.role, row.brand, row.district, row.branch))
+          .sort((a, b) => (roleRank[a.profile.role] ?? 9) - (roleRank[b.profile.role] ?? 9)
+            || (a.profile.role === "ps" ? natural(a.brand, b.brand) : natural(a.district, b.district))
+            || natural(a.profile.full_name, b.profile.full_name));
+        const branchRows = liveData.branches
+          .filter(branch => !ui.district || branch.district_id === ui.district)
+          .map(branch => ({ id: branch.id, district: districtName(branch.district_id), branch: branch.name, code: branch.code || "Not set" }))
+          .filter(row => matches(query, row.district, row.branch, row.code))
+          .sort((a, b) => natural(a.district, b.district) || natural(a.branch, b.branch));
+        const geoButtons = (kind, id) => `<button class="button button-outline button-small" type="button" data-geo="edit-${kind}" data-id="${escapeHTML(id)}">Update</button> <button class="button button-outline button-small" type="button" data-geo="delete-${kind}" data-id="${escapeHTML(id)}">Delete</button>`;
+        const districtRows = liveData.districts
+          .filter(item => !ui.district || item.id === ui.district)
+          .map(item => ({ id: item.id, district: item.name, branches: liveData.branches.filter(branch => branch.district_id === item.id).length }))
+          .filter(row => matches(query, row.district))
+          .sort((a, b) => natural(a.district, b.district));
+        const districtsPanel = panel("Districts", `${districtRows.length} district${districtRows.length === 1 ? "" : "s"}.`, tableBlock(
+          "districtlist",
+          ["District", "Branches", ""],
+          districtRows,
+          row => `<tr><td><strong>${escapeHTML(row.district)}</strong></td><td>${row.branches}</td><td class="manage-cell">${geoButtons("district", row.id)}</td></tr>`,
+          "No districts yet. Use + District to create one.",
+          5,
+        ));
+        const branchesPanel = panel("Branches", `${branchRows.length} branch${branchRows.length === 1 ? "" : "es"}, grouped by district.`, tableBlock(
+          "branchlist",
+          ["District", "Branch", "Code", ""],
+          branchRows,
+          row => `<tr><td>${escapeHTML(row.district)}</td><td><strong>${escapeHTML(row.branch)}</strong></td><td>${escapeHTML(row.code)}</td><td class="manage-cell">${geoButtons("branch", row.id)}</td></tr>`,
+          "No branches yet. Use + Branch to create one.",
+        ));
+        return (ui.peopleDisabled ? "" : districtsPanel + branchesPanel) + panel(ui.peopleDisabled ? "Disabled accounts" : "Staff profiles", ui.peopleDisabled ? "Records are kept. Restore an account to return it to active Staff Profiles." : "Active accounts only. Highest role first; Product Specialists are grouped by brand.", tableBlock(
+          ui.peopleDisabled ? "disabled-people" : "people",
+          ["Name", "Role", "Brand", "Salesperson Code", "District", "Branch", "Status", ""],
+          people,
+          row => {
+            const p = row.profile;
+            const buttons = `<select class="staff-actions" data-person-action="${escapeHTML(p.id)}" aria-label="Actions for ${escapeHTML(p.full_name)}"><option value="">Actions</option><option value="edit">Update</option>${p.role === "admin" ? "" : `<option value="transfer">Transfer</option>${p.active && !demoStore ? '<option value="invite">Reissue pending invitation</option>' : ""}<option value="toggle">${p.active ? "Disable" : "Restore"}</option><option value="delete">Delete</option>`}</select>`;
+            return `<tr><td><strong>${escapeHTML(p.full_name)}</strong></td><td>${escapeHTML(row.role)}</td><td>${escapeHTML(row.brand)}</td><td class="salesperson-code">${escapeHTML(p.salesperson_code || "—")}</td><td>${escapeHTML(row.district)}</td><td>${escapeHTML(row.branch)}</td><td>${p.active ? "Active" : "Disabled"}</td><td class="manage-cell">${buttons}</td></tr>`;
+          },
+          "No staff profiles match these filters.",
+        ));
+      },
+    );
+  }
+
+  function companyHolidayDates() {
+    return (liveData.holidays || []).map(item => item.date);
+  }
+
+  const PACE_STATUS_LABELS = { behind: "Behind the pace", on: "On track", exceeded: "More than target" };
+  const SCHEDULE_DEFAULTS = ["10:00", "13:00", "16:00"];
+
+  function scheduleLabel(timeText) {
+    if (!timeText) return "—";
+    const [hourText, minuteText] = String(timeText).slice(0, 5).split(":");
+    const hour = Number(hourText || 0);
+    const minute = Number(minuteText || 0);
+    const ampm = hour >= 12 ? "PM" : "AM";
+    const h12 = hour % 12 || 12;
+    return `${h12}:${String(minute).padStart(2, "0")} ${ampm}`;
+  }
+
+  function pushMessagesPanel() {
+    if (currentProfile.role !== "admin") return "";
+    const groups = Object.entries(PACE_STATUS_LABELS).map(([status, label]) => {
+      const items = (liveData.pushMessages || []).filter(item => item.status === status);
+      const list = items.length
+        ? `<ul class="push-list">${items.map(item => `<li><span>${escapeHTML(item.message)}</span><button class="button button-outline button-small" type="button" data-push-delete="${escapeHTML(item.id)}">Delete</button></li>`).join("")}</ul>`
+        : '<p class="an-note">No messages yet. A built-in default is used until you add one.</p>';
+      return `<div class="push-group"><div class="push-group-head"><h3>${escapeHTML(label)}</h3><button class="button button-outline button-small" type="button" data-open="push-message" data-status="${status}">+ Add message</button></div>${list}</div>`;
+    }).join("");
+    const schedules = (liveData.pushSchedules || []).slice().sort((a, b) => String(a.send_at).localeCompare(String(b.send_at)));
+    const rows = schedules.length
+      ? `<ul class="push-list">${schedules.map(item => `<li><span><strong>${escapeHTML(scheduleLabel(item.send_at))}</strong> · ${item.active ? "Active" : "Paused"}</span><span class="push-inline-actions"><button class="button button-outline button-small" type="button" data-open="push-schedule" data-id="${escapeHTML(item.id)}">Edit</button><button class="button button-outline button-small" type="button" data-push-schedule-delete="${escapeHTML(item.id)}">Delete</button></span></li>`).join("")}</ul>`
+      : '<p class="an-note">No schedule yet. Add one or more times per day for behind-pace alerts.</p>';
+    const schedulePanel = `<div class="push-group"><div class="push-group-head"><h3>Behind-pace push schedule</h3><button class="button button-outline button-small" type="button" data-open="push-schedule">+ Add time</button></div>${rows}<p class="an-note">These times control repeated push alerts for Product Specialists who are currently behind pace. Time zone: Asia/Manila.</p></div>`;
+    return panel("Alert messages", "Shown after sign in for all pace statuses. Push alerts use the schedule below and only target Product Specialists who are behind pace.", `<div class="push-groups">${schedulePanel}${groups}</div>${PLACEHOLDER_LEGEND}`);
+  }
+
+  const PLACEHOLDER_LEGEND = `<dl class="push-legend">
+    <dt>{name}</dt><dd>The Product Specialist's first name. Example: <em>Maria</em></dd>
+    <dt>{sold}</dt><dd>Their own sales so far this month (before today). Example: <em>₱1,250,000.00</em></dd>
+    <dt>{expected}</dt><dd>How much they should have sold by now to stay on pace (their share × the share of selling days passed). Example: <em>₱1,800,000.00</em></dd>
+    <dt>{share}</dt><dd>Their individual monthly target: the branch target ÷ number of PS in the branch. Example: <em>₱4,000,000.00</em></dd>
+  </dl>
+  <p class="an-note">Each placeholder is replaced with that person's own figures when the alert is sent, so every PS sees their own name and numbers.</p>`;
+
+  function openPushMessageModal(status) {
+    openModal({
+      title: `Add message · ${PACE_STATUS_LABELS[status]}`,
+      intro: "Placeholders are filled in automatically for each Product Specialist.",
+      submitLabel: "Add message",
+      body: fieldHTML("Message", "message", '<textarea name="message" rows="3" maxlength="240" required></textarea>') + PLACEHOLDER_LEGEND,
+      onSubmit: async form => {
+        mustRpc(await client.rpc("save_push_message", { p_status: status, p_message: uppercaseEntry(form.elements.message.value) }));
+        await refreshData();
+      },
+    });
+  }
+
+  function openPushScheduleModal(schedule) {
+    openModal({
+      title: schedule ? "Edit push schedule" : "Add push schedule",
+      intro: "At each active time, a push notification can be sent again to Product Specialists who are still behind pace.",
+      submitLabel: schedule ? "Save time" : "Add time",
+      body: `${fieldHTML("Time (Asia/Manila)", "time", `<input name="time" type="time" required value="${escapeHTML(schedule?.send_at || SCHEDULE_DEFAULTS[(liveData.pushSchedules || []).length % SCHEDULE_DEFAULTS.length])}">`)}
+        <label class="check-row"><input type="checkbox" name="active" ${schedule?.active === false ? "" : "checked"}> <span>Active</span></label>`,
+      onSubmit: async form => {
+        mustRpc(await client.rpc("save_push_alert_schedule", {
+          p_id: schedule?.id || null,
+          p_send_at: `${form.elements.time.value}:00`,
+          p_active: form.elements.active.checked,
+        }));
+        await refreshData();
+      },
+    });
+  }
+
+  function openDeleteProductsModal() {
+    const barcodes = [...productSelection];
+    const everything = barcodes.length === productsFiltered.length;
+    const needsTyping = barcodes.length >= 50;
+    openModal({
+      title: "Delete products",
+      intro: `Permanently delete ${barcodes.length} selected product${barcodes.length === 1 ? "" : "s"}${everything ? " (everything in the current list)" : ""}? They are removed from every branch. Past sales keep their own product details, and a snapshot is kept.`,
+      submitLabel: `Delete ${barcodes.length}`,
+      body: needsTyping ? fieldHTML("Type DELETE to confirm", "confirm", '<input name="confirm" autocomplete="off" required pattern="DELETE">') : "",
+      onSubmit: async () => {
+        for (let i = 0; i < barcodes.length; i += 2000) {
+          mustRpc(await client.rpc("delete_products", { p_barcodes: barcodes.slice(i, i + 2000) }));
+        }
+        productSelection.clear();
+        await refreshData();
+      },
+    });
+  }
+
+  function openSyncCategoriesModal() {
+    const iso = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    const now = new Date();
+    const ranges = {
+      all: ["Entire history", null, null],
+      month: ["This month", iso(new Date(now.getFullYear(), now.getMonth(), 1)), iso(new Date(now.getFullYear(), now.getMonth() + 1, 0))],
+      last: ["Last month", iso(new Date(now.getFullYear(), now.getMonth() - 1, 1)), iso(new Date(now.getFullYear(), now.getMonth(), 0))],
+      quarter: ["Last 3 months", iso(new Date(now.getFullYear(), now.getMonth() - 2, 1)), iso(new Date(now.getFullYear(), now.getMonth() + 1, 0))],
+      year: ["This year", `${now.getFullYear()}-01-01`, `${now.getFullYear()}-12-31`],
+      custom: ["Custom dates", null, null],
+    };
+    openModal({
+      title: "Update sales categories",
+      intro: "Copies each product's current category and sub-category from the Products list onto recorded sales (matched by barcode). Amounts, prices, SRP and quantities are never changed.",
+      submitLabel: "Update sales",
+      body: `
+        ${fieldHTML("Which sales", "range", `<select name="range">${Object.entries(ranges).map(([key, value]) => `<option value="${key}">${value[0]}</option>`).join("")}</select>`)}
+        <div class="field-row" id="sync-custom" hidden>
+          ${fieldHTML("From", "from", '<input name="from" type="date">')}
+          ${fieldHTML("To", "to", '<input name="to" type="date">')}
+        </div>
+        ${fieldHTML("Which lines", "mode", '<select name="mode"><option value="missing">Only lines with no category yet</option><option value="all">Every line (replace existing categories)</option></select>')}`,
+      onReady: form => {
+        const toggle = () => { form.querySelector("#sync-custom").hidden = form.elements.range.value !== "custom"; };
+        form.elements.range.addEventListener("change", toggle);
+        toggle();
+      },
+      onSubmit: async form => {
+        const choice = form.elements.range.value;
+        let from = ranges[choice][1];
+        let to = ranges[choice][2];
+        if (choice === "custom") {
+          from = form.elements.from.value || null;
+          to = form.elements.to.value || null;
+          if (!from && !to) throw new Error("Pick a start date, an end date, or both.");
+        }
+        const result = mustRpc(await client.rpc("sync_sale_categories", { p_from: from, p_to: to, p_overwrite: form.elements.mode.value === "all" }));
+        await refreshData();
+        return `<p>Checked <strong>${escapeHTML(result.lines_checked)}</strong> sale line(s) and updated <strong>${escapeHTML(result.lines_updated)}</strong>.</p>`;
+      },
+    });
+  }
+
+  async function readHistoryRows(file) {
+    if (/\.csv$/i.test(file.name)) return parseCsv(await file.text());
+    if (!window.XLSX) throw new Error("The Excel reader could not load. Save the file as CSV and try again.");
+    const workbook = window.XLSX.read(await file.arrayBuffer(), { type: "array" });
+    if (workbook.Workbook?.WBProps?.date1904) throw new Error("Sales History supports only the 1900-date-system export.");
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    return window.XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: "" });
+  }
+
+  const HISTORY_BRANCH_HINTS = { CAU: "cauayan", ILA: "ilagan", STG: "santiago", TUG: "tuguegarao" };
+
+  function openSalesHistoryModal() {
+    const batches = [...(liveData.importBatches || [])].filter(batch => batch.kind !== "daily").sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    const branches = [...liveData.branches].sort((a, b) => natural(a.name, b.name));
+    let parsed = null;
+    let fileName = "";
+    let batchId = null;
+    const batchList = batches.length
+      ? `<p class="dlg-intro"><strong>Previous imports</strong></p><ul class="push-list">${batches.map(batch => `<li><span>${escapeHTML(batch.label)} — ${escapeHTML(batch.sales_count)} sales, ${escapeHTML(batch.lines_count)} items, ${formatMoney(Number(batch.amount))} (${escapeHTML(batch.date_from || "")} to ${escapeHTML(batch.date_to || "")})</span><button class="button button-outline button-small" type="button" data-history-remove="${escapeHTML(batch.id)}">Remove</button></li>`).join("")}</ul>`
+      : "";
+    openModal({
+      title: "Import sales history",
+      intro: "Admin only. Upload the company sales database (.xlsx or .csv, one row per item sold). Everything is tagged as one import. Excel dates are kept as stored; enable date repair only for a confirmed legacy export.",
+      submitLabel: "Import",
+      wide: true,
+      body: `${batchList}
+        ${fieldHTML("Sales database file", "file", '<input name="file" type="file" accept=".xlsx,.xls,.csv" required>')}
+        <label class="check-row"><input name="repairExcelDates" type="checkbox">Repair day/month-swapped Excel dates (confirmed legacy exports only; normally leave unchecked).</label>
+        ${fieldHTML("Name for this import", "label", '<input name="label" maxlength="80" placeholder="e.g. Jan–Jun 2026 sales">')}
+        <div id="history-preview" class="dlg-preview">No file chosen.</div>
+        <div id="history-map"></div>
+        <p class="dlg-preview" id="history-progress" hidden></p>`,
+      onReady: form => {
+        form.querySelectorAll("[data-history-remove]").forEach(button => button.addEventListener("click", () => {
+          const batch = batches.find(item => item.id === button.dataset.historyRemove);
+          if (batch) openRemoveHistoryModal(batch);
+        }));
+        let revision = 0;
+        const previewFile = async () => {
+          const currentRevision = ++revision;
+          const preview = form.querySelector("#history-preview");
+          const map = form.querySelector("#history-map");
+          parsed = null;
+          batchId = null;
+          map.innerHTML = "";
+          const file = form.elements.file.files[0];
+          if (!file) return;
+          fileName = file.name;
+          if (!form.elements.label.value) form.elements.label.value = file.name.replace(/\.[^.]+$/, "").slice(0, 80);
+          preview.textContent = "Reading the file… large files can take up to a minute.";
+          try {
+            await new Promise(resolve => setTimeout(resolve, 30));
+            const rows = await readHistoryRows(file);
+            if (currentRevision !== revision || !form.isConnected) return;
+            parsed = window.BranchlineSalesHistory.parseSalesHistory(rows, { repairExcelDates: form.elements.repairExcelDates.checked });
+            const future = parsed.sales.find(sale => sale.sold_on > window.BranchlineDemo.philippineDate());
+            if (future) throw new Error(`Invoice ${future.invoice} has future sale date ${future.sold_on}. Check the source dates and legacy repair setting.`);
+            const { stats } = parsed;
+            const months = Object.keys(stats.byMonth).sort().map(month => `<li>${escapeHTML(month)}: ${formatMoney(stats.byMonth[month].amount)} (${stats.byMonth[month].lines} items)</li>`).join("");
+            preview.innerHTML = `<strong>${stats.sales}</strong> sales, <strong>${stats.lines}</strong> items, net <strong>${formatMoney(stats.amount)}</strong>, ${escapeHTML(stats.from)} to ${escapeHTML(stats.to)}.<br>${stats.datesFixed} scrambled date(s) repaired${stats.returns ? `, ${stats.returns} return line(s) included as negatives` : ""}${stats.skipped ? `, ${stats.skipped} unusable row(s) skipped` : ""}.<ul>${months}</ul>`;
+            map.innerHTML = Object.keys(stats.byDivision).sort().map(division => {
+              const hint = HISTORY_BRANCH_HINTS[division];
+              const guess = branches.find(branch => hint && branch.name.toLowerCase().includes(hint));
+              const options = [["", "Skip this branch"], ...branches.map(branch => [branch.id, branch.name])];
+              const entry = stats.byDivision[division];
+              return fieldHTML(`${division} → ${entry.sales} sales, ${formatMoney(entry.amount)}`, `div-${division}`, selectHTML(`div-${division}`, options, guess ? guess.id : ""));
+            }).join("");
+          } catch (error) {
+            if (currentRevision !== revision || !form.isConnected) return;
+            parsed = null;
+            preview.textContent = error.message;
+          }
+        };
+        form.elements.file.addEventListener("change", previewFile);
+        form.elements.repairExcelDates.addEventListener("change", previewFile);
+      },
+      onSubmit: async form => {
+        if (!parsed || !parsed.sales.length) throw new Error("Choose a valid sales database file first.");
+        const branchFor = {};
+        Object.keys(parsed.stats.byDivision).forEach(division => { branchFor[division] = form.elements[`div-${division}`]?.value || ""; });
+        const sales = parsed.sales.filter(sale => branchFor[sale.division]).map(sale => ({ ...sale, branch_id: branchFor[sale.division] }));
+        if (!sales.length) throw new Error("Match at least one branch code to a branch.");
+        if (!window.confirm(`Import ${sales.length} sales into ${demoStore ? "this local demo" : "the live data"}? You can remove the whole import afterwards.`)) throw new Error("Import cancelled.");
+        batchId ||= crypto.randomUUID();
+        const label = uppercaseEntry(form.elements.label.value || fileName || "Sales history");
+        const progress = form.querySelector("#history-progress");
+        progress.hidden = false;
+        const totals = { sales: 0, lines: 0, skipped_existing: 0, matched_ps: 0 };
+        const chunks = window.BranchlineSalesHistory.chunkSales(sales, 200);
+        for (let index = 0; index < chunks.length; index += 1) {
+          progress.textContent = `Importing… ${Math.min(index * 200, sales.length)} of ${sales.length} sales`;
+          const part = mustRpc(await client.rpc("import_sales_history", {
+            p_batch: batchId, p_label: label, p_file: fileName,
+            p_sales: chunks[index].map(sale => ({ branch_id: sale.branch_id, invoice: sale.invoice, sold_on: sale.sold_on,
+              customer: uppercaseEntry(sale.customer), ps_name: uppercaseEntry(sale.ps_name), salespersoncode: sale.salespersoncode || null, payment_mode: sale.payment_mode,
+              lines: sale.lines.map(line => ({ ...line, description: uppercaseEntry(line.description), brand: uppercaseEntry(line.brand),
+                category: uppercaseEntry(line.category), sub_category: uppercaseEntry(line.sub_category) })) })),
+          }));
+          Object.keys(totals).forEach(key => { totals[key] += Number(part[key]) || 0; });
+        }
+        await refreshData();
+        return `<p>Imported <strong>${totals.sales}</strong> sales (${totals.lines} items). ${totals.matched_ps} were matched to a Product Specialist account; the rest keep the salesperson's name only.${totals.skipped_existing ? ` ${totals.skipped_existing} invoice(s) already existed and were left alone.` : ""}</p>`;
+      },
+    });
+  }
+
+  function openRemoveHistoryModal(batch) {
+    const daily = batch.kind === "daily";
+    openModal({
+      title: daily ? "Remove imported daily totals" : "Remove imported sales",
+      intro: daily
+        ? `Permanently remove "${batch.label}" — ${batch.sales_count} day(s) of totals and walk-ins. Live sales and counts are not affected.`
+        : `Permanently remove "${batch.label}" — ${batch.sales_count} sales and ${batch.lines_count} items (${formatMoney(Number(batch.amount))}). Sales entered by your team are not affected.`,
+      submitLabel: "Remove import",
+      body: "",
+      onSubmit: async () => {
+        const result = mustRpc(await client.rpc("delete_sales_import", { p_batch: batch.id }));
+        await refreshData();
+        return daily ? `<p>Removed ${escapeHTML(result.days)} day(s) of totals.</p>` : `<p>Removed ${escapeHTML(result.sales)} sale(s) and ${escapeHTML(result.lines)} item(s).</p>`;
+      },
+    });
+  }
+
+  function openDailyHistoryModal() {
+    const A = window.BranchlineDailyHistory;
+    const batches = (liveData.importBatches || []).filter(batch => batch.kind === "daily").sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    const branches = [...liveData.branches].sort((a, b) => natural(a.name, b.name));
+    const santiago = branches.find(branch => branch.name.toLowerCase().includes("santiago"));
+    const prevMonthEnd = new Date(new Date().getFullYear(), new Date().getMonth(), 0);
+    const defaultCutoff = `${prevMonthEnd.getFullYear()}-${String(prevMonthEnd.getMonth() + 1).padStart(2, "0")}-${String(prevMonthEnd.getDate()).padStart(2, "0")}`;
+    let book = null;
+    let fileName = "";
+    let batchId = null;
+    const batchList = batches.length
+      ? `<p class="dlg-intro"><strong>Previous imports</strong></p><ul class="push-list">${batches.map(batch => `<li><span>${escapeHTML(batch.label)} — ${escapeHTML(batch.sales_count)} day(s) (${escapeHTML(batch.date_from || "")} to ${escapeHTML(batch.date_to || "")})</span><button class="button button-outline button-small" type="button" data-history-remove="${escapeHTML(batch.id)}">Remove</button></li>`).join("")}</ul>`
+      : "";
+    openModal({
+      title: "Import daily monitoring file",
+      intro: "Admin only. Upload a monthly 'Daily Sales Monitoring' workbook (one sheet per month). It brings in daily sales, invoice counts and walk-ins for this year and last year. Days that already have live sales or counts are never overwritten. You can remove the whole import later.",
+      submitLabel: "Import",
+      wide: true,
+      body: `${batchList}
+        ${fieldHTML("Monitoring workbook", "file", '<input name="file" type="file" accept=".xlsx,.xls" required>')}
+        ${fieldHTML("Branch", "branch", selectHTML("branch", branches.map(branch => [branch.id, branch.name]), santiago ? santiago.id : ""))}
+        ${fieldHTML("Year of the 'this year' columns", "year", `<input name="year" type="number" min="2000" max="2100" value="${new Date().getFullYear()}" required>`)}
+        ${fieldHTML("Import this year's days up to", "cutoff", `<input name="cutoff" type="date" value="${defaultCutoff}" required>`)}
+        <div id="history-preview" class="dlg-preview">No file chosen.</div>
+        <p class="dlg-preview" id="history-progress" hidden></p>`,
+      onReady: form => {
+        const preview = form.querySelector("#history-preview");
+        let parsed = null;
+        const reparse = () => {
+          parsed = null;
+          if (!book) return;
+          try {
+            parsed = A.parseMonitoring(book, { year: Number(form.elements.year.value), cutoff: form.elements.cutoff.value });
+            const months = parsed.months.sort((a, b) => a.month - b.month).map(item => `<li>${A.MONTHS[item.month - 1]}: this year ${formatMoney(item.ty.sales)} (${item.ty.transactions} inv., ${item.ty.walkins} walk-ins) · last year ${formatMoney(item.ly.sales)} (${item.ly.transactions} inv., ${item.ly.walkins} walk-ins)</li>`).join("");
+            preview.innerHTML = `<strong>${parsed.rows.length}</strong> day(s) ready.${parsed.warnings.length ? `<br>${parsed.warnings.map(escapeHTML).join("<br>")}` : ""}<ul>${months}</ul>`;
+          } catch (error) {
+            preview.textContent = error.message;
+          }
+        };
+        form.querySelectorAll("[data-history-remove]").forEach(button => button.addEventListener("click", () => {
+          const batch = batches.find(item => item.id === button.dataset.historyRemove);
+          if (batch) openRemoveHistoryModal(batch);
+        }));
+        form.elements.year.addEventListener("change", reparse);
+        form.elements.cutoff.addEventListener("change", reparse);
+        form.elements.file.addEventListener("change", async () => {
+          book = null;
+          batchId = null;
+          const file = form.elements.file.files[0];
+          if (!file) return;
+          fileName = file.name;
+          const guess = file.name.match(/20\d\d/);
+          if (guess) form.elements.year.value = guess[0];
+          preview.textContent = "Reading the file…";
+          try {
+            await new Promise(resolve => setTimeout(resolve, 30));
+            const workbook = window.XLSX.read(await file.arrayBuffer(), { type: "array" });
+            book = {};
+            workbook.SheetNames.forEach(name => {
+              book[name] = window.XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, raw: true, defval: "" });
+            });
+            reparse();
+          } catch (error) {
+            preview.textContent = error.message;
+          }
+        });
+        form.reparse = () => parsed;
+      },
+      onSubmit: async form => {
+        const parsed = form.reparse && form.reparse();
+        if (!parsed || !parsed.rows.length) throw new Error("Choose a valid monitoring workbook first.");
+        const branch = form.elements.branch.value;
+        if (!branch) throw new Error("Choose a branch.");
+        if (!window.confirm(`Import ${parsed.rows.length} day(s) into ${demoStore ? "this local demo" : "the live data"}? Days with existing sales or counts are left alone. You can remove the import afterwards.`)) throw new Error("Import cancelled.");
+        batchId ||= crypto.randomUUID();
+        const label = `${fileName.replace(/\.[^.]+$/, "").slice(0, 70) || "Daily monitoring"}`;
+        const progress = form.querySelector("#history-progress");
+        progress.hidden = false;
+        const totals = { days: 0, skipped_existing: 0, payment_days: 0, payment_skipped: 0 };
+        for (let index = 0; index < parsed.rows.length; index += 400) {
+          progress.textContent = `Importing… ${index} of ${parsed.rows.length} days`;
+          const part = mustRpc(await client.rpc("import_daily_history_with_payments", {
+            p_batch: batchId, p_label: label, p_file: fileName, p_branch: branch,
+            p_rows: parsed.rows.slice(index, index + 400),
+          }));
+          Object.keys(totals).forEach(key => { totals[key] += Number(part[key]) || 0; });
+        }
+        await refreshData();
+        return `<p>Imported <strong>${totals.days}</strong> day(s).${totals.skipped_existing ? ` ${totals.skipped_existing} day(s) already existed; saved totals were retained.` : ""} Loaded payment breakdowns for <strong>${totals.payment_days}</strong> day(s).${totals.payment_skipped ? ` ${totals.payment_skipped} breakdown(s) were not changed because they already exist or their saved totals differ.` : ""}</p>`;
+      },
+    });
+  }
+
+  function openDeleteSaleModal(sale) {
+    openModal({
+      title: "Delete transaction",
+      intro: `Permanently delete invoice ${sale.invoice_number} (${sale.customer_name}) and all of its items? A snapshot is kept in the deletion record, but the sale is removed from every total.`,
+      submitLabel: "Delete transaction",
+      body: "",
+      onSubmit: async () => {
+        mustRpc(await client.rpc("admin_delete_sale", { p_sale_id: sale.id }));
+        await refreshData();
+      },
+    });
+  }
+
+  function openHolidayModal() {
+    openModal({
+      title: "Add store-closed date",
+      intro: "Applies company-wide. The date is skipped when counting selling days in forecasts.",
+      submitLabel: "Add date",
+      body: fieldHTML("Date", "date", '<input name="date" type="date" required>') + fieldHTML("Label (optional)", "label", '<input name="label" maxlength="80" placeholder="e.g. Christmas Day">'),
+      onSubmit: async form => {
+        mustRpc(await client.rpc("save_company_holiday", { p_date: form.elements.date.value, p_label: uppercaseEntry(form.elements.label.value) || null }));
+        await refreshData();
+      },
+    });
+  }
+
+  function openWalkInModal(kind) {
+    const today = localISODate();
+    const isStore = kind === "store";
+    const branches = liveData.branches.filter(branch => scopeBranchIds().has(branch.id));
+    const branchField = isStore
+      ? fieldHTML("Branch", "branch", selectHTML("branch", branches.map(branch => [branch.id, branch.name]), branches[0]?.id || "")) : "";
+    openModal({
+      title: isStore ? "Record store visitors" : "Log clients assisted",
+      intro: isStore
+        ? "Total visitors for the whole store. This overrides the sum of PS counts for that day. Leave the count blank to clear it."
+        : "How many clients you assisted that day, whether or not they bought. Saving again replaces your count for that date.",
+      submitLabel: "Save",
+      body: branchField + fieldHTML("Date", "date", `<input name="date" type="date" max="${today}" value="${today}" required>`)
+        + fieldHTML(isStore ? "Visitors" : "Clients assisted", "count", `<input name="count" type="number" min="0" step="1" ${isStore ? "" : "required"}>`),
+      onSubmit: async form => {
+        const raw = form.elements.count.value.trim();
+        if (isStore) {
+          mustRpc(await client.rpc("save_branch_walkins", { p_branch_id: form.elements.branch.value, p_date: form.elements.date.value, p_count: raw === "" ? null : Number(raw) }));
+        } else {
+          mustRpc(await client.rpc("save_ps_walkins", { p_date: form.elements.date.value, p_count: Number(raw) }));
+        }
+        await refreshData();
+      },
+    });
+  }
+
+  function openWalkInDailyModal(range) {
+    const A = window.BranchlineAnalytics;
+    const ctx = walkInDailyCtx;
+    if (!ctx) return;
+    const { ids, isPs } = ctx;
+    const showAssistedComparison = ["manager", "district_manager", "admin"].includes(currentProfile.role);
+    const monthStart = range?.from || ctx.monthStart;
+    const through = range?.to || ctx.through;
+    const storeCounts = storeCountsFor(ids, isPs);
+    const psCounts = liveData.psWalkins.filter(row => ids.has(row.branch_id) && (!isPs || row.ps_id === currentProfile.id));
+    const assistedByDay = new Map();
+    if (showAssistedComparison) psCounts.forEach(row => {
+      const date = String(row.counted_on).slice(0, 10);
+      if (!assistedByDay.has(date)) assistedByDay.set(date, 0);
+      assistedByDay.set(date, assistedByDay.get(date) + Math.max(0, Math.trunc(Number(row.clients_assisted) || 0)));
+    });
+    const transactions = withHistoryTransactions(analyticsFacts(ids), ids, isPs);
+    const transactionsByDay = new Map();
+    transactions.forEach(fact => {
+      if (!transactionsByDay.has(fact.date)) transactionsByDay.set(fact.date, new Set());
+      transactionsByDay.get(fact.date).add(fact.saleId);
+    });
+    const summarize = (from, to) => A.walkInSummary({ from, to, storeCounts, psCounts: showAssistedComparison ? [] : psCounts, transactions });
+    const label = isPs ? "Clients assisted" : "Walk-in traffic";
+    const rate = value => value === null ? "n/a" : `${(value * 100).toFixed(1)}%`;
+    const change = (ty, ly) => ty === null || ly === null ? "—" : growthCell(A.growth(ty, ly));
+    const metricCells = ([assisted, ftTy, ftLy, trTy, trLy], conversionTy, conversionLy, date = null) => {
+      const values = [
+        ...(showAssistedComparison ? [assisted] : []),
+        ftTy, ftLy, change(ftTy, ftLy), trTy, trLy, change(trTy, trLy),
+        rate(conversionTy), rate(conversionLy), change(conversionTy, conversionLy),
+      ];
+      return values.map((value, index) => {
+        if (date && showAssistedComparison && index === 0 && value !== null) {
+          return '<td><button type="button" class="traffic-assist-link" data-review-ps-day="' +
+            escapeHTML(date) + '" aria-label="Review PS inputs for ' + escapeHTML(date) + '">' +
+            escapeHTML(String(value)) + '</button></td>';
+        }
+        return '<td>' + (value ?? "—") + '</td>';
+      }).join("");
+    };
+    const totals = [null, null, null, null, null];
+    const rows = [];
+    for (let day = monthStart; day <= through; day = A.addDays(day, 1)) {
+      const prior = A.sameDayPriorYear(day);
+      const now = summarize(day, day);
+      const before = summarize(prior, prior);
+      const weekday = new Date(`${day}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" });
+      const counts = [
+        assistedByDay.get(day) ?? null,
+        now.coveredDays ? now.visitors : null,
+        before.coveredDays ? before.visitors : null,
+        transactionsByDay.get(day)?.size ?? 0,
+        transactionsByDay.get(prior)?.size ?? 0,
+      ];
+      counts.forEach((count, index) => {
+        if (count !== null) totals[index] = (totals[index] ?? 0) + count;
+      });
+      rows.push(`<tr><td>${escapeHTML(day)}</td><td>${escapeHTML(weekday)}</td>${metricCells(counts, now.conversion, before.conversion, day)}</tr>`);
+    }
+    const [, ftTy, ftLy, trTy, trLy] = totals;
+    const body = rows.reverse().join("");
+    const footer = `<tfoot><tr><th scope="row">Total</th><td></td>${metricCells(totals, ftTy > 0 ? trTy / ftTy : null, ftLy > 0 ? trLy / ftLy : null)}</tr></tfoot>`;
+    const headers = ["Date", "Day", ...(showAssistedComparison ? ["PS inputs"] : []),
+      "FT TY", "FT LY", "FT +/-% (TY vs LY)", "TR# TY", "TR# LY", "TR# +/-% (TY vs LY)",
+      "Conv. rate TY", "Conv. rate LY", "Conv. rate +/-% (TY vs LY)"];
+    if (collectingExports) return dailyComparisonSheet("Traffic and transactions by day", body, headers, footer);
+    closeModal();
+    modalRoot = document.createElement("div");
+    modalRoot.className = "dlg-backdrop";
+    const root = modalRoot;
+    root.innerHTML = `<div class="dlg dlg-xwide" role="dialog" aria-modal="true" aria-label="${escapeHTML(label)} by day">
+      <div class="dlg-head"><h2>Traffic and transactions · ${escapeHTML(monthStart)} to ${escapeHTML(through)}</h2><div class="dlg-head-actions">${exportButton('data-download-dialog', "Download traffic and transactions by day")}<button class="dlg-close" type="button" aria-label="Close" data-modal-close>×</button></div></div>
+      <div class="dlg-form"><div class="dlg-head-actions walkin-actions">
+        <label class="field"><span>From</span><input type="date" data-walkin-from value="${escapeHTML(monthStart)}" required></label>
+        <label class="field"><span>To</span><input type="date" data-walkin-to value="${escapeHTML(through)}" required></label>
+        <button class="button button-outline button-small" type="button" data-walkin-entry>${isPs ? "Log clients assisted" : "Record store visitors"}</button>${showAssistedComparison ? '<button class="button button-outline button-small" type="button" data-review-ps-monthly>Monthly PS performance</button>' : ""}</div>
+        <p class="an-note">${showAssistedComparison ? "PS inputs are shown separately from store visitors. Select a PS inputs number to review staff entries, or open Monthly PS performance. " : "Visitors reflect your clients assisted. "}A dash indicates a missing count. N/A indicates a zero LY baseline or missing or zero traffic for conversion. Percentage changes compare TY with LY, including conversion rates. Totals use recorded counts across the selected dates.</p>
+        <div class="ps-lines traffic-table-wrap"><table class="connected-table"><thead><tr>${headers.map(header => `<th>${escapeHTML(header)}</th>`).join("")}</tr></thead><tbody>${body}</tbody>${footer}</table></div>
+      </div></div>`;
+    document.body.appendChild(root);
+    wireDialogExport(root, "Traffic and transactions by day");
+    if (showAssistedComparison) root.addEventListener("click", event => {
+      const dayButton = event.target.closest("[data-review-ps-day]");
+      if (dayButton) openPsAssistDailyReview(dayButton.dataset.reviewPsDay, { from: monthStart, to: through });
+      else if (event.target.closest("[data-review-ps-monthly]")) openPsAssistMonthlyReview(monthStart.slice(0, 7));
+    });
+    root.querySelector(".dlg-close").addEventListener("click", closeModal);
+    root.addEventListener("pointerdown", event => {
+      if (event.target === root || event.target.closest("[data-modal-close]")) closeModal();
+    });
+    root.querySelector("[data-walkin-entry]")?.addEventListener("click", () => {
+      closeModal();
+      openWalkInModal(isPs ? "ps" : "store");
+    });
+    const fromInput = root.querySelector("[data-walkin-from]");
+    const toInput = root.querySelector("[data-walkin-to]");
+    root.addEventListener("change", event => {
+      if (event.target !== fromInput && event.target !== toInput) return;
+      toInput.setCustomValidity("");
+      if (!fromInput.reportValidity() || !toInput.reportValidity()) return;
+      if (fromInput.value > toInput.value) {
+        toInput.setCustomValidity("To must be on or after From.");
+        toInput.reportValidity();
+        return;
+      }
+      openWalkInDailyModal({ from: fromInput.value, to: toInput.value });
+    });
+  }
+
+
+  // Management review reuses existing PS day-level totals and real sale IDs.
+  // An assist is NOT an individual customer record; a sale cannot be linked
+  // to a specific assisted customer until a separate per-assist log exists.
+  function psAssistReviewAuthorized() {
+    return ["manager", "district_manager", "admin"].includes(currentProfile?.role);
+  }
+
+  function psAssistReviewFacts(from, to, requestedIds) {
+    if (!psAssistReviewAuthorized()) return [];
+    const allowed = scopeBranchIds();
+    const ids = new Set([...requestedIds].filter(id => allowed.has(id)));
+    const rows = new Map();
+    const profiles = new Map((liveData.profiles || []).map(person => [person.id, person]));
+    const key = (branch, ps, day) => JSON.stringify([branch, ps, day]);
+    const entryFor = (branch, ps, day, fallbackName = "") => {
+      const id = key(branch, ps, day);
+      if (!rows.has(id)) rows.set(id, {
+        branch, ps, day, name: profiles.get(ps)?.full_name || fallbackName || "Staff member",
+        assists: null, sales: new Map(),
+      });
+      return rows.get(id);
+    };
+    (liveData.psWalkins || []).forEach(item => {
+      const day = String(item.counted_on || "").slice(0, 10);
+      if (!ids.has(item.branch_id) || !item.ps_id || day < from || day > to) return;
+      const value = Number(item.clients_assisted);
+      if (!Number.isInteger(value) || value < 0) return;
+      const row = entryFor(item.branch_id, item.ps_id, day);
+      row.assists = (row.assists ?? 0) + value;
+    });
+    (liveData.sales || []).forEach(sale => {
+      const day = String(sale.sold_on || "").slice(0, 10);
+      if (!ids.has(sale.branch_id) || !sale.ps_id || day < from || day > to
+          || (typeof isTestSale === "function" && isTestSale(sale, liveData.testPsIds))) return;
+      entryFor(sale.branch_id, sale.ps_id, day, sale.ps_name).sales.set(sale.id, sale);
+    });
+    return [...rows.values()].sort((a, b) =>
+      natural(a.day, b.day) || natural(a.name, b.name) || natural(a.branch, b.branch));
+  }
+
+  function psAssistReviewRate(assists, transactions) {
+    if (assists === null || assists <= 0) return "n/a";
+    return (100 * transactions / assists).toFixed(1) + "%";
+  }
+
+  function psAssistReviewBackButton() {
+    return '<button type="button" class="button button-outline button-small" data-ps-review-back>← Back</button>';
+  }
+
+  function openPsAssistDailyReview(day, range) {
+    const context = walkInDailyCtx;
+    if (!psAssistReviewAuthorized() || !context || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return;
+    const rows = psAssistReviewFacts(day, day, context.ids);
+    const assistRows = rows.filter(row => row.assists !== null);
+    const total = assistRows.reduce((sum, row) => sum + row.assists, 0);
+    const totalSales = new Set(rows.flatMap(row => [...row.sales.keys()])).size;
+    const body = rows.length ? rows.map(row =>
+      '<tr><td>' + escapeHTML(row.name) + '</td><td>' + escapeHTML(branchName(row.branch)) +
+      '</td><td><button type="button" class="traffic-assist-link" data-ps-review-sales="' +
+      escapeHTML(row.ps) + '" data-ps-review-branch="' + escapeHTML(row.branch) + '">' +
+      (row.assists ?? "—") + '</button></td><td>' + row.sales.size + '</td><td>' +
+      psAssistReviewRate(row.assists, row.sales.size) + '</td></tr>').join("")
+      : '<tr><td colspan="5">No PS assistance or identified PS transactions for this day.</td></tr>';
+    openModal({
+      title: "PS assistance review · " + day, wide: true, readOnly: true,
+      body: psAssistReviewBackButton() +
+        '<p class="an-note">Recorded PS assists: ' + (assistRows.length ? total : "not recorded") +
+        ' · Identified PS transactions: ' + totalSales +
+        '. PS counts are self-reported assisted customers, not unique store visitors. Differences do not automatically mean an entry is wrong.</p>' +
+        '<div class="ps-lines traffic-table-wrap"><table class="connected-table"><thead><tr><th>Product Specialist</th><th>Branch</th><th>PS assists</th><th>Transactions</th><th>Transactions / assists</th></tr></thead><tbody>' +
+        body + '</tbody></table></div>',
+      onReady: form => form.addEventListener("click", event => {
+        if (event.target.closest("[data-ps-review-back]")) {
+          openWalkInDailyModal(range);
+          return;
+        }
+        const selected = event.target.closest("[data-ps-review-sales]");
+        if (selected) openPsAssistSalesLog(selected.dataset.psReviewSales, selected.dataset.psReviewBranch, day,
+          () => openPsAssistDailyReview(day, range));
+      }),
+    });
+  }
+
+  function openPsAssistSalesLog(ps, branch, day, back) {
+    const context = walkInDailyCtx;
+    if (!psAssistReviewAuthorized() || !context) return;
+    const row = psAssistReviewFacts(day, day, context.ids).find(item =>
+      item.ps === ps && item.branch === branch);
+    if (!row) return;
+    const sales = [...row.sales.values()].sort((a, b) =>
+      natural(a.invoice_number || a.id, b.invoice_number || b.id));
+    const body = sales.length ? sales.map(sale => {
+      const lines = linesForSale(sale.id);
+      const products = lines.map(line => (line.model_description || line.barcode || "Product") +
+        " × " + Number(line.quantity || 0)).join(", ");
+      return '<tr><td>' + escapeHTML(sale.invoice_number || sale.id) + '</td><td>' +
+        escapeHTML(sale.customer_name || "—") + '</td><td>' +
+        escapeHTML(products || "No item detail") + '</td><td>' +
+        escapeHTML(sale.payment_mode || "—") + '</td><td>' +
+        escapeHTML(formatMoney(saleTotal(sale, "price"))) + '</td></tr>';
+    }).join("") : '<tr><td colspan="5">No sales transactions recorded for this PS on this date.</td></tr>';
+    openModal({
+      title: "PS sales log · " + row.name + " · " + day, wide: true, readOnly: true,
+      body: psAssistReviewBackButton() +
+        '<p class="an-note">Clients assisted: ' + (row.assists ?? "not recorded") +
+        ' · Recorded transactions: ' + sales.length + '. Invoices below belong to this PS on the chosen date; they are not matched to individual assisted customers.</p>' +
+        '<div class="ps-lines traffic-table-wrap"><table class="connected-table"><thead><tr><th>Invoice</th><th>Customer</th><th>Products / quantity</th><th>Payment mode</th><th>Sales amount</th></tr></thead><tbody>' +
+        body + '</tbody></table></div>',
+      onReady: form => form.querySelector("[data-ps-review-back]").addEventListener("click", back),
+    });
+  }
+
+  function openPsAssistMonthlyReview(month, branchFilter = "", psFilter = "") {
+    const context = walkInDailyCtx;
+    if (!psAssistReviewAuthorized() || !context || !/^\d{4}-\d{2}$/.test(month)) return;
+    const from = month + "-01";
+    const monthEnd = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0))
+      .toISOString().slice(0, 10);
+    const until = month === currentMonth() ? localISODate() : monthEnd;
+    const authorized = scopeBranchIds();
+    const branches = (liveData.branches || []).filter(branch =>
+      context.ids.has(branch.id) && authorized.has(branch.id));
+    if (!branches.some(branch => branch.id === branchFilter)) branchFilter = "";
+    const ids = new Set(branches.filter(branch => !branchFilter || branch.id === branchFilter)
+      .map(branch => branch.id));
+    const daily = psAssistReviewFacts(from, until, ids);
+    const people = new Map();
+    daily.forEach(row => {
+      const key = JSON.stringify([row.branch, row.ps]);
+      if (!people.has(key)) people.set(key, {
+        ps: row.ps, branch: row.branch, name: row.name, assists: 0,
+        recordedDays: 0, sales: new Map(), coveredSales: new Map(), missingDays: new Set(),
+      });
+      const person = people.get(key);
+      if (row.assists !== null) {
+        person.assists += row.assists;
+        person.recordedDays++;
+        row.sales.forEach((sale, id) => person.coveredSales.set(id, sale));
+      } else if (row.sales.size) person.missingDays.add(row.day);
+      row.sales.forEach((sale, id) => person.sales.set(id, sale));
+    });
+    const allPeople = [...people.values()].sort((a, b) =>
+      b.assists - a.assists || natural(a.name, b.name));
+    if (psFilter && !allPeople.some(person => person.ps === psFilter)) psFilter = "";
+    const visible = allPeople.filter(person => !psFilter || person.ps === psFilter);
+    const branchOptions = ['<option value="">All authorized branches</option>']
+      .concat(branches.map(branch => '<option value="' + escapeHTML(branch.id) + '"' +
+        (branchFilter === branch.id ? ' selected' : '') + '>' + escapeHTML(branch.name) + '</option>')).join("");
+    const psOptions = ['<option value="">All Product Specialists</option>']
+      .concat(allPeople.map(person => '<option value="' + escapeHTML(person.ps) + '"' +
+        (psFilter === person.ps ? ' selected' : '') + '>' + escapeHTML(person.name) + '</option>')).join("");
+    const body = visible.length ? visible.map(person =>
+      '<tr><td>' + escapeHTML(person.name) + '</td><td>' + escapeHTML(branchName(person.branch)) +
+      '</td><td><button class="traffic-assist-link" type="button" data-ps-review-person="' +
+      escapeHTML(person.ps) + '" data-ps-review-person-branch="' + escapeHTML(person.branch) + '">' +
+      person.assists + '</button></td><td>' + person.sales.size + '</td><td>' +
+      person.coveredSales.size + '</td><td>' + psAssistReviewRate(person.assists, person.coveredSales.size) +
+      '</td><td>' + person.recordedDays + '</td><td>' + person.missingDays.size + '</td></tr>').join("")
+      : '<tr><td colspan="8">No PS assistance or identified transactions for the selected month.</td></tr>';
+    openModal({
+      title: "Monthly PS performance · " + monthLabel(month), wide: true, readOnly: true,
+      body: psAssistReviewBackButton() +
+        '<div class="dlg-head-actions walkin-actions"><label class="field"><span>Month</span><input type="month" data-ps-review-month value="' +
+        escapeHTML(month) + '"></label><label class="field"><span>Branch</span><select data-ps-review-month-branch>' +
+        branchOptions + '</select></label><label class="field"><span>Product Specialist</span><select data-ps-review-month-ps>' +
+        psOptions + '</select></label></div>' +
+        '<p class="an-note">Transactions / assists uses unique sales invoices ONLY on days with a recorded PS assistance count; this avoids treating missing entries as zero. Total transactions includes days with no assistance entry. A rate above 100% or an unlogged sale date merits review, not automatic correction. Click a PS assist count for daily details.</p>' +
+        '<div class="ps-lines traffic-table-wrap"><table class="connected-table"><thead><tr><th>Product Specialist</th><th>Branch</th><th>Assists</th><th>All transactions</th><th>Transactions on logged days</th><th>Transactions / assists</th><th>Days logged</th><th>Sale dates without PS entry</th></tr></thead><tbody>' +
+        body + '</tbody></table></div>',
+      onReady: form => {
+        form.querySelector("[data-ps-review-back]").addEventListener("click", () => openWalkInDailyModal());
+        form.querySelector("[data-ps-review-month]").addEventListener("change", event =>
+          openPsAssistMonthlyReview(event.target.value, branchFilter, psFilter));
+        form.querySelector("[data-ps-review-month-branch]").addEventListener("change", event =>
+          openPsAssistMonthlyReview(month, event.target.value, ""));
+        form.querySelector("[data-ps-review-month-ps]").addEventListener("change", event =>
+          openPsAssistMonthlyReview(month, branchFilter, event.target.value));
+        form.addEventListener("click", event => {
+          const selected = event.target.closest("[data-ps-review-person]");
+          if (selected) openPsAssistMonthlyPerson(selected.dataset.psReviewPerson,
+            selected.dataset.psReviewPersonBranch, month, branchFilter, psFilter);
+        });
+      },
+    });
+  }
+
+  function openPsAssistMonthlyPerson(ps, branch, month, branchFilter, psFilter) {
+    const context = walkInDailyCtx;
+    if (!psAssistReviewAuthorized() || !context) return;
+    const from = month + "-01";
+    const to = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0))
+      .toISOString().slice(0, 10);
+    const rows = psAssistReviewFacts(from, to, context.ids)
+      .filter(row => row.ps === ps && row.branch === branch);
+    if (!rows.length) return;
+    const body = rows.map(row =>
+      '<tr><td>' + escapeHTML(row.day) + '</td><td><button type="button" class="traffic-assist-link" data-ps-review-person-day="' +
+      escapeHTML(row.day) + '">' + (row.assists ?? "—") +
+      '</button></td><td>' + row.sales.size + '</td><td>' +
+      psAssistReviewRate(row.assists, row.sales.size) + '</td></tr>').join("");
+    openModal({
+      title: "PS daily performance · " + rows[0].name + " · " + monthLabel(month), wide: true, readOnly: true,
+      body: psAssistReviewBackButton() +
+        '<p class="an-note">Click the daily assist number to see this PS’s sales log for that date. A dash means no assistance count was submitted.</p>' +
+        '<div class="ps-lines traffic-table-wrap"><table class="connected-table"><thead><tr><th>Date</th><th>PS assists</th><th>Transactions</th><th>Transactions / assists</th></tr></thead><tbody>' +
+        body + '</tbody></table></div>',
+      onReady: form => {
+        form.querySelector("[data-ps-review-back]").addEventListener("click", () =>
+          openPsAssistMonthlyReview(month, branchFilter, psFilter));
+        form.addEventListener("click", event => {
+          const selected = event.target.closest("[data-ps-review-person-day]");
+          if (selected) openPsAssistSalesLog(ps, branch, selected.dataset.psReviewPersonDay, () =>
+            openPsAssistMonthlyPerson(ps, branch, month, branchFilter, psFilter));
+        });
+      },
+    });
+  }
+
+  function openTransactionsDailyModal() {
+    const A = window.BranchlineAnalytics;
+    const ctx = walkInDailyCtx;
+    if (!ctx) return;
+    const { ids, isPs, monthStart, through } = ctx;
+    const perDay = new Map();
+    withHistoryTransactions(analyticsFacts(ids), ids, isPs).forEach(f => {
+      if (!perDay.has(f.date)) perDay.set(f.date, new Set());
+      perDay.get(f.date).add(f.saleId);
+    });
+    const count = (from, to) => {
+      let total = 0;
+      perDay.forEach((set, date) => { if (date >= from && date <= to) total += set.size; });
+      return total;
+    };
+    const total = count(monthStart, through);
+    const priorTotal = count(A.sameDayPriorYear(monthStart), A.sameDayPriorYear(through));
+    const change = (now, before) => {
+      const diff = now - before;
+      const pct = before ? ` (${diff > 0 ? "+" : ""}${((diff / before) * 100).toFixed(1)}%)` : "";
+      return `<span class="${diff < 0 ? "an-down" : "an-up"}">${diff > 0 ? "+" : ""}${diff}${pct}</span>`;
+    };
+    const days = [];
+    for (let day = monthStart; day <= through; day = A.addDays(day, 1)) days.push(day);
+    const body = days.map(day => {
+      const prior = A.sameDayPriorYear(day);
+      const now = perDay.get(day)?.size || 0;
+      const before = perDay.get(prior)?.size || 0;
+      return `<tr><td>${escapeHTML(day)}</td><td>${now}</td><td>${escapeHTML(prior)}</td><td>${before}</td><td>${change(now, before)}</td></tr>`;
+    }).reverse().join("");
+    if (collectingExports) return dailyComparisonSheet("Transactions by day", body);
+    closeModal();
+    modalRoot = document.createElement("div");
+    modalRoot.className = "dlg-backdrop";
+    const root = modalRoot;
+    root.innerHTML = `<div class="dlg dlg-xwide" role="dialog" aria-modal="true" aria-label="Transactions by day">
+      <div class="dlg-head"><h2>Transactions · ${escapeHTML(monthStart)} to ${escapeHTML(through)}</h2><div class="dlg-head-actions">${exportButton('data-download-dialog', "Download transactions by day")}<button class="dlg-close" type="button" aria-label="Close" data-modal-close>×</button></div></div>
+      <div class="dlg-form">
+        <div class="connected-metrics wk-totals">
+          <article class="connected-metric"><span>This year (month to date)</span><strong>${total}</strong><small>TEST transactions are not counted</small></article>
+          <article class="connected-metric"><span>Same days last year</span><strong>${priorTotal}</strong><small>${escapeHTML(A.sameDayPriorYear(monthStart))} to ${escapeHTML(A.sameDayPriorYear(through))}</small></article>
+          <article class="connected-metric"><span>Change</span><strong>${change(total, priorTotal)}</strong><small>Versus the same days last year</small></article>
+        </div>
+        <div class="ps-lines"><table class="connected-table"><thead><tr><th>Date</th><th>This year</th><th>Last year date</th><th>Last year</th><th>Change</th></tr></thead><tbody>${body}</tbody></table></div>
+      </div></div>`;
+    document.body.appendChild(root);
+    wireDialogExport(root, "Transactions by day");
+    root.querySelector(".dlg-close").addEventListener("click", closeModal);
+    root.addEventListener("pointerdown", event => {
+      if (event.target === root || event.target.closest("[data-modal-close]")) closeModal();
+    });
+  }
+
+  function openWipeModal() {
+    openModal({
+      title: "Delete all data",
+      intro: "This permanently deletes every district, branch, staff login, product, sale, target and notification. Only Administrator accounts and payment modes are kept. There is no undo.",
+      submitLabel: "Delete everything",
+      body: fieldHTML("Type DELETE EVERYTHING to confirm", "confirm", '<input name="confirm" required autocomplete="off">'),
+      onSubmit: async form => {
+        if (form.elements.confirm.value.trim() !== "DELETE EVERYTHING") throw new Error("Type DELETE EVERYTHING exactly to confirm.");
+        mustRpc(await client.rpc("wipe_all_data", { p_confirm: "DELETE EVERYTHING" }));
+        await refreshData();
+      },
+    });
+  }
+
+  // ---------- Modal helper ----------
+  let modalRoot = null;
+  let inventorySerialReturn = null;
+
+  function closeModal() {
+    closeColumnMenu();
+    closeExportMenu();
+    const popup = pieTablePopup;
+    pieTablePopup = null;
+    if (modalRoot?.certificatePreviewUrl) URL.revokeObjectURL(modalRoot.certificatePreviewUrl);
+    modalRoot?.remove();
+    modalRoot = null;
+    if (inventorySerialReturn?.isConnected) inventorySerialReturn.focus({ preventScroll: true });
+    inventorySerialReturn = null;
+    if (popup) {
+      const trigger = popup.trigger.isConnected ? popup.trigger : [...connectedContent.querySelectorAll("[data-pie-table]")]
+        .find(element => element.dataset.pieTable === popup.key && element.getAttribute("aria-label") === popup.label);
+      trigger?.focus();
+    }
+  }
+
+  function fieldHTML(label, name, control) {
+    return `<label class="field"><span>${escapeHTML(label)}</span>${control}</label>`;
+  }
+
+  function selectHTML(name, options, selected = "", extra = "") {
+    return `<select name="${name}" ${extra}>${options.map(([value, text]) =>
+      `<option value="${escapeHTML(value)}" ${value === selected ? "selected" : ""}>${escapeHTML(text)}</option>`).join("")}</select>`;
+  }
+
+  // onSubmit(form) may return HTML to show as a result view; returning nothing closes the modal.
+  function openModal({ title, intro = "", body, submitLabel = "Save", wide = false, inline = false, readOnly = false, headerAction = "", onSubmit, onReady }) {
+    if (!inline) closeModal();
+    const root = document.createElement("div");
+    root.className = inline ? "inventory-form-panel" : "dlg-backdrop";
+    root.innerHTML = `<div class="dlg${wide ? " dlg-wide" : ""}" ${inline ? 'role="region"' : 'role="dialog" aria-modal="true"'} aria-label="${escapeHTML(title)}">
+      <div class="dlg-head"><h2>${escapeHTML(title)}</h2>${inline ? "" : `<div class="dlg-head-actions">${headerAction}<button class="dlg-close" type="button" aria-label="Close" data-modal-close>×</button></div>`}</div>
+      <form class="dlg-form" novalidate>
+        ${intro ? `<p class="dlg-intro">${escapeHTML(intro)}</p>` : ""}
+        <div class="dlg-body">${body}</div>
+        <p class="dlg-error" role="alert" hidden></p>
+        ${readOnly && headerAction ? "" : `<div class="dlg-actions">${readOnly ? '<button class="button button-primary" type="button" data-modal-close>Close</button>' : `${inline ? "" : '<button class="button button-outline" type="button" data-modal-close>Cancel</button>'}<button class="button button-primary" type="submit">${escapeHTML(submitLabel)}</button>`}</div>`}
+      </form></div>`;
+    if (inline) document.querySelector("#live-results").appendChild(root);
+    else { modalRoot = root; document.body.appendChild(root); }
+    const form = root.querySelector("form");
+    const error = root.querySelector(".dlg-error");
+    if (headerAction) root.querySelector(".dlg-close")?.addEventListener("click", closeModal);
+    if (!inline) root.addEventListener("pointerdown", event => {
+      if (event.target === root || event.target.closest("[data-modal-close]")) closeModal();
+    });
+    if (readOnly) root.addEventListener("keydown", event => {
+      if (event.key !== "Tab") return;
+      const buttons = [...root.querySelectorAll("button")];
+      const first = buttons[0], last = buttons[buttons.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    });
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      if (readOnly) return;
+      const submit = form.querySelector('[type="submit"]');
+      error.hidden = true;
+      if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+      }
+      submit.disabled = true;
+      workspaceWrites++;
+      try {
+        const result = await onSubmit(form);
+        if (result === false) return;
+        if (inline) {
+          document.querySelector("#live-results")?.insertAdjacentHTML("afterbegin", `<p class="inventory-form-success" role="status">${result || `${escapeHTML(title)} saved successfully.`}</p>`);
+          return;
+        }
+        if (result) {
+          root.querySelector(".dlg").innerHTML = `<div class="dlg-head"><h2>${escapeHTML(title)}</h2><button class="dlg-close" type="button" aria-label="Close" data-modal-close>×</button></div><div class="dlg-form">${result}<div class="dlg-actions"><button class="button button-primary" type="button" data-modal-close>Done</button></div></div>`;
+        } else {
+          closeModal();
+        }
+      } catch (caught) {
+        console.error(title, caught);
+        error.textContent = friendlyError(caught);
+        error.hidden = false;
+        submit.disabled = false;
+      } finally {
+        workspaceWrites--;
+        submit.disabled = false;
+      }
+    });
+    onReady?.(form);
+    if (!inline) (readOnly ? root.querySelector("[data-modal-close]") : form.querySelector("input,select"))?.focus();
+  }
+
+  function friendlyError(error) {
+    const text = String(error?.message || error || "Something went wrong.");
+    if (/Official-source check failed|climate-review|forecast-climate|event calendar|event adjustment|calendar event/i.test(text)) return text;
+    if (/Could not find the function|schema cache|PGRST202/i.test(text)) {
+      return "This feature needs a one-time backend setup that has not been applied yet (admin_tools migration).";
+    }
+    if (/Failed to send a request to the Edge Function|FunctionsFetchError|not found/i.test(text)) {
+      return "The create-user service is not deployed yet (Edge Function admin-create-user).";
+    }
+    return text;
+  }
+
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && !columnMenu && modalRoot && !workspaceWrites) closeModal();
+  });
+
+  async function refreshData() {
+    if (currentSession) await loadLiveWorkspace(currentSession);
+  }
+
+  function renderTransferAlerts() {
+    connectedContent.querySelector("[data-transfer-alerts]")?.remove();
+    if (!liveData || !currentProfile || activePage !== "settings") return;
+    const pending = (liveData.inventoryTransferBatches || []).filter(batch =>
+      (batch.status === "pending_approval" && canReviewTransfer(batch.from_branch,true)) ||
+      (batch.status === "transit" && canReviewTransfer(batch.to_branch)));
+    if (pending.length) connectedContent.insertAdjacentHTML("afterbegin",
+      `<section class="inventory-reminder" role="status" data-transfer-alerts><strong>${pending.length} transfer(s) need your review</strong><p>${pending.map(batch => escapeHTML(`${batch.reference}: ${batch.status === "pending_approval" ? "Approve or reject source dispatch" : "Accept or reject destination receipt"}`)).join("<br>")}</p><button class="button button-outline" type="button" data-transfer-inbox>Review transfers</button></section>`);
+  }
+
+  let transferPollBusy = false;
+  async function refreshTransferAlerts() {
+    if (transferPollBusy || !currentProfile || currentProfile.role === "ps" || !liveData || workspaceWrites || modalRoot ||
+        document.visibilityState !== "visible" || (activePage === "inventory" && ["import","transfer"].includes(ui.invView))) return;
+    const capturedClient = client, profileId = currentProfile.id;
+    transferPollBusy = true;
+    try {
+      const batches = checkResult(await fetchAllFrom(capturedClient, "inventory_transfer_batches", "*", [["requested_at",false],["id",true]]),
+        "Unable to refresh transfer approvals");
+      if (client !== capturedClient || currentProfile?.id !== profileId) return;
+      const changed = JSON.stringify(batches) !== JSON.stringify(liveData.inventoryTransferBatches);
+      const oldStates = new Map((liveData.inventoryTransferBatches || []).map(batch => [batch.id,batch.status]));
+      const received = batches.some(batch => batch.status === "received" && oldStates.get(batch.id) !== "received");
+      if (changed) await refreshInventoryData({refreshProducts:received});
+      else renderTransferAlerts();
+      connectedContent.querySelector("[data-transfer-alert-error]")?.remove();
+    } catch (error) {
+      console.error("Unable to refresh transfer approvals.", error);
+      if (!connectedContent.querySelector("[data-transfer-alert-error]")) connectedContent.insertAdjacentHTML("afterbegin",
+        '<p class="connected-error" role="alert" data-transfer-alert-error>Transfer alerts could not refresh. Reload before reviewing stock transfers.</p>');
+    } finally { transferPollBusy = false; }
+  }
+  setInterval(refreshTransferAlerts, 45000);
+  document.addEventListener("visibilitychange", refreshTransferAlerts);
+  window.addEventListener("hashchange", () => {
+    if (location.hash !== "#inventory" || !currentProfile || !liveData || workspaceWrites) return;
+    activePage = "inventory"; ui.invView = "transfers"; renderConnected();
+    refreshTransferAlerts();
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible" || !currentProfile || !liveData?.inventoryStock?.length || workspaceWrites || modalRoot) return;
+    const dayKey = `${demoStore ? "demo" : "live"}:${currentProfile.id}:${window.BranchlineDemo.philippineDate()}`;
+    if (inventoryReminderChecked === dayKey) return;
+    refreshInventoryData().then(showInventoryReminder).catch(error => {
+      console.error("Unable to refresh inventory reminder.", error);
+      connectedContent.insertAdjacentHTML("afterbegin", '<p class="connected-error">Inventory could not refresh. Reload to check aging stock.</p>');
+    });
+  });
+
+  function mustRpc(result) {
+    if (result.error) throw result.error;
+    return result.data;
+  }
+
+  function knownBrands() {
+    return [...new Set(liveData.products.map(product => product.brand.trim()).filter(Boolean))].sort(natural);
+  }
+
+  function knownCategories() {
+    const map = new Map(Object.entries(CATEGORY_SEEDS).map(([category, subs]) => [category, new Set(subs)]));
+    liveData.products.forEach(product => {
+      if (!product.category) return;
+      if (!map.has(product.category)) map.set(product.category, new Set());
+      if (product.sub_category) map.get(product.category).add(product.sub_category);
+    });
+    return map;
+  }
+
+  // ---------- Products ----------
+  function openProductModal(existing) {
+    const categories = knownCategories();
+    const adminClassification = existing && currentProfile.role !== "admin" && window.BranchlineInventory.needsClassification(existing);
+    const adminSrp = existing && currentProfile.role !== "admin" && existing.srp == null;
+    const subOptions = category => [...(categories.get(titleCase(category)) || [])].sort(natural)
+      .map(sub => `<option value="${escapeHTML(sub)}"></option>`).join("");
+    openModal({
+      title: existing ? "Edit product" : "Add product",
+      intro: existing ? `Changes apply to the shared catalog and historical product details for every branch, never recorded sale prices or quantities. Blank SRP clears an existing price to 0; an unset price stays pending.${adminSrp ? " Only Admin can complete this product's missing SRP." : ""}${adminClassification ? " Only Admin can complete missing classification in Inventory → Needs classification." : ""}` : "Adds or updates this barcode in every branch. Nonblank classifications replace existing fields; blanks preserve them. A new product with blank SRP stays pending for Admin; a blank SRP replaces an existing price with 0.",
+      submitLabel: existing ? "Save changes" : "Add product",
+      body: `${fieldHTML("Brand", "brand", `<input name="brand" list="brand-options" required autocomplete="off" value="${escapeHTML(existing?.brand || "")}">`)}
+        <datalist id="brand-options">${knownBrands().map(brand => `<option value="${escapeHTML(brand)}"></option>`).join("")}</datalist>
+        ${fieldHTML("Category (e.g. Aircon)", "category", `<input name="category" list="category-options" required autocomplete="off" value="${escapeHTML(existing?.category || "")}">`)}
+        <datalist id="category-options">${[...categories.keys()].sort(natural).map(category => `<option value="${escapeHTML(category)}"></option>`).join("")}</datalist>
+        ${fieldHTML("Sub-category (e.g. Split Type)", "subcategory", `<input name="subcategory" list="sub-options" autocomplete="off" value="${escapeHTML(existing?.sub_category || "")}">`)}
+        <datalist id="sub-options">${subOptions(existing?.category)}</datalist>
+        ${fieldHTML("Model description", "description", `<input name="description" required autocomplete="off" value="${escapeHTML(existing?.model_description || "")}">`)}
+        ${fieldHTML("Barcode (numbers are padded to 8 digits)", "barcode", `<input name="barcode" required autocomplete="off" value="${escapeHTML(existing?.barcode || "")}">`)}
+        ${fieldHTML("SRP (₱, suggested retail price)", "srp", `<input name="srp" type="number" min="0" step="0.01" value="${existing?.srp ?? ""}">`)}`,
+      onReady: form => {
+        if (adminSrp) {
+          form.elements.srp.disabled = true;
+          form.elements.srp.title = "Only Admin can complete this product's missing SRP.";
+        }
+        if (adminClassification) for (const name of ["brand", "category", "subcategory"]) {
+          form.elements[name].disabled = true;
+          form.elements[name].required = false;
+        }
+        form.elements.category.addEventListener("input", () => {
+          form.querySelector("#sub-options").innerHTML = subOptions(form.elements.category.value);
+        });
+      },
+      onSubmit: async form => {
+        const values = {
+          p_brand: adminClassification ? existing.brand : uppercaseEntry(form.elements.brand.value),
+          p_description: uppercaseEntry(form.elements.description.value),
+          p_barcode: normBarcode(form.elements.barcode.value),
+          p_category: adminClassification ? existing.category || null : uppercaseEntry(form.elements.category.value),
+          p_sub_category: adminClassification ? existing.sub_category || null : uppercaseEntry(form.elements.subcategory.value) || null,
+          p_srp: adminSrp ? null : form.elements.srp.value === "" ? null : Number(form.elements.srp.value),
+        };
+        if (existing) mustRpc(await client.rpc("update_product", { p_old_barcode: existing.barcode, ...values }));
+        else mustRpc(await client.rpc("add_product", values));
+        await refreshData();
+      },
+    });
+  }
+
+  function normalizeHeader(text) {
+    return String(text ?? "").toLowerCase().replace(/[^a-z]/g, "");
+  }
+
+  function parseCsv(text) {
+    const rows = [];
+    let row = [];
+    let cell = "";
+    let quoted = false;
+    for (let i = 0; i < text.length; i += 1) {
+      const char = text[i];
+      if (quoted) {
+        if (char === '"' && text[i + 1] === '"') { cell += '"'; i += 1; }
+        else if (char === '"') quoted = false;
+        else cell += char;
+      } else if (char === '"') quoted = true;
+      else if (char === ",") { row.push(cell); cell = ""; }
+      else if (char === "\n" || char === "\r") {
+        if (char === "\r" && text[i + 1] === "\n") i += 1;
+        row.push(cell);
+        rows.push(row);
+        row = [];
+        cell = "";
+      } else cell += char;
+    }
+    if (cell || row.length) { row.push(cell); rows.push(row); }
+    return rows;
+  }
+
+  async function readSpreadsheet(file) {
+    if (/\.csv$/i.test(file.name)) return parseCsv(await file.text());
+    if (!window.XLSX) throw new Error("The Excel reader could not load. Save the file as CSV and try again.");
+    const workbook = window.XLSX.read(await file.arrayBuffer(), { type: "array" });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    return window.XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "" });
+  }
+
+  function productsFromRows(rows) {
+    const headerIndex = rows.findIndex(row => row.some(cell => normalizeHeader(cell) === "barcode"));
+    if (headerIndex < 0) throw new Error("Could not find a header row with Brand, Description and Barcode columns.");
+    const header = rows[headerIndex].map(normalizeHeader);
+    const find = (...names) => header.findIndex(name => names.includes(name));
+    const brandAt = find("brand");
+    const descAt = find("description", "modeldescription", "model", "product");
+    const codeAt = find("barcode");
+    const categoryAt = find("category");
+    const subAt = find("subcategory");
+    const srpAt = find("srp", "suggestedretailprice", "price");
+    if (brandAt < 0 || descAt < 0 || codeAt < 0) throw new Error("Columns needed: Brand, Description (or Model Description) and Barcode.");
+    const items = [];
+    let skipped = 0;
+    rows.slice(headerIndex + 1).forEach(row => {
+      if (row.every(cell => !String(cell ?? "").trim())) return;
+      const item = {
+        brand: uppercaseEntry(row[brandAt]),
+        description: uppercaseEntry(row[descAt]),
+        barcode: normBarcode(row[codeAt]),
+        category: categoryAt >= 0 ? uppercaseEntry(row[categoryAt]) : "",
+        sub_category: subAt >= 0 ? uppercaseEntry(row[subAt]) : "",
+        srp: srpAt < 0 || !String(row[srpAt] ?? "").trim() ? null : Number(String(row[srpAt]).replace(/[₱,\s]/g, "")),
+      };
+      if (item.srp !== null && (!Number.isFinite(item.srp) || item.srp < 0)) throw new Error("SRP must be a non-negative number.");
+      if (item.brand && item.description && item.barcode) items.push(item);
+      else skipped += 1;
+    });
+    return { items, skipped };
+  }
+
+  function downloadFile(name, blob) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  function csvText(rows) {
+    return rows.map(row => row.map(cell => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(",")).join("\r\n");
+  }
+
+  function downloadTemplate() {
+    downloadFile("products-template.csv", new Blob([csvText([["Brand", "Category", "Sub-category", "Description", "Barcode", "SRP"], ["Sample Brand", "Aircon", "Split Type", "Sample Model 1.0HP", "00012345", "24999.00"]])], { type: "text/csv" }));
+  }
+
+  function openImportModal() {
+    let parsed = null;
+    openModal({
+      title: "Import products",
+      intro: "Admin only. Upload .xlsx, .xls or .csv with Brand, Description and Barcode; Category, Sub-category and SRP are optional. Nonblank classifications replace existing values; blank fields preserve them. Supplied SRP is used. Blank/absent SRP stays pending for new products and becomes 0 for existing products. New items are added to every branch.",
+      submitLabel: "Import",
+      body: `<input name="file" type="file" accept=".xlsx,.xls,.csv" required>
+        <p class="dlg-preview" id="import-preview">No file chosen.</p>
+        <button class="button button-outline button-small" type="button" id="import-template">Download template</button>`,
+      onReady: form => {
+        form.querySelector("#import-template").addEventListener("click", downloadTemplate);
+        form.elements.file.addEventListener("change", async () => {
+          const preview = form.querySelector("#import-preview");
+          parsed = null;
+          const file = form.elements.file.files[0];
+          if (!file) return;
+          try {
+            parsed = productsFromRows(await readSpreadsheet(file));
+            preview.textContent = `${parsed.items.length} valid product${parsed.items.length === 1 ? "" : "s"}${parsed.skipped ? `, ${parsed.skipped} row(s) skipped (missing a field)` : ""}.`;
+          } catch (error) {
+            preview.textContent = error.message;
+          }
+        });
+      },
+      onSubmit: async () => {
+        if (!parsed || !parsed.items.length) throw new Error("Choose a file with at least one valid product.");
+        let imported = 0;
+        for (let start = 0; start < parsed.items.length; start += 1000) {
+          const part = mustRpc(await client.rpc("import_products", { p_items: parsed.items.slice(start, start + 1000) }));
+          imported += Number(part.products) || 0;
+        }
+        const result = { products: imported };
+        await refreshData();
+        return `<p>Imported <strong>${escapeHTML(result.products)}</strong> product(s) into every branch.</p>`;
+      },
+    });
+  }
+
+  // ---------- Targets ----------
+  function openTargetModal(existing) {
+    const branches = [...liveData.branches].sort((a, b) => natural(a.name, b.name));
+    const month = existing ? existing.month.slice(0, 7) : ui.month || currentMonth();
+    openModal({
+      title: existing ? "Edit target" : "Set target",
+      intro: "Targets apply to the branches you manage. Use / to combine brands (MIDEA / TOSHIBA). A category suffix applies only to its own brand (CARRIER / CONDURA - AIRCON). Scoped targets take that category out of the general brand target. CON- prefixes count with the base brand.",
+      submitLabel: "Save target",
+      body: `${fieldHTML("Type", "type", selectHTML("type", [["branch", "Branch target (all brands)"], ["brand", "Brand target"]], "branch", existing ? "disabled" : ""))}
+        ${fieldHTML("Branch", "branch", selectHTML("branch", [...(branches.length > 1 && !existing ? [["all", `All my branches (${branches.length})`]] : []), ...branches.map(branch => [branch.id, branch.name])], existing ? existing.branch_id : branches.length > 1 ? "all" : branches[0]?.id, existing ? "disabled" : ""))}
+        <div id="brand-field" hidden>${fieldHTML("Brand", "brand", `<input name="brand" list="brand-options" autocomplete="off"><datalist id="brand-options">${knownBrands().map(brand => `<option value="${escapeHTML(brand)}"></option>`).join("")}</datalist>`)}</div>
+        ${fieldHTML("Month", "month", `<input name="month" type="month" value="${month}" required>`)}
+        ${fieldHTML("Target amount (₱)", "amount", `<input name="amount" type="number" min="0" step="0.01" value="${existing ? Number(existing.amount) : ""}" required>`)}`,
+      onReady: form => {
+        const sync = () => { form.querySelector("#brand-field").hidden = form.elements.type.value !== "brand"; };
+        form.elements.type.addEventListener("change", sync);
+        sync();
+      },
+      onSubmit: async form => {
+        const type = form.elements.type.value;
+        const brand = uppercaseEntry(form.elements.brand.value);
+        if (type === "brand" && !brand) throw new Error("Enter the brand for this target.");
+        const amount = Number(form.elements.amount.value);
+        if (!Number.isFinite(amount) || amount < 0) throw new Error("Enter a valid target amount.");
+        const selected = form.elements.branch.value;
+        const ids = selected === "all" ? branches.map(branch => branch.id) : [selected];
+        const monthDate = `${form.elements.month.value}-01`;
+        const records = ids.map(id => ({
+          dealer_id: currentProfile.dealer_id,
+          branch_id: id,
+          month: monthDate,
+          amount,
+          created_by: currentProfile.id,
+          ...(type === "brand" ? { brand } : {}),
+        }));
+        const result = await client
+          .from(type === "brand" ? "brand_targets" : "monthly_targets")
+          .upsert(records, { onConflict: type === "brand" ? "branch_id,month,brand" : "branch_id,month" });
+        if (result.error) throw result.error;
+        await refreshData();
+      },
+    });
+  }
+
+  function openBulkTargetsModal() {
+    const branches = [...liveData.branches].sort((a, b) => natural(a.name, b.name));
+    if (!branches.length) {
+      openModal({ title: "Add multiple targets", body: "<p>There are no branches in your scope yet.</p>", submitLabel: "OK", onSubmit: async () => {} });
+      return;
+    }
+    const month = ui.month || currentMonth();
+    const options = [["", "Select branch"], ...(branches.length > 1 ? [["all", `All my branches (${branches.length})`]] : []), ...branches.map(branch => [branch.id, branch.name])];
+    const rowHTML = index => `${selectHTML(`t${index}_branch`, options, "", `aria-label="Branch, row ${index + 1}"`)}<input name="t${index}_brand" list="brand-options" placeholder="Brand" aria-label="Brand, row ${index + 1}" autocomplete="off"><input name="t${index}_amount" type="number" min="0" step="0.01" placeholder="Target amount (₱)" aria-label="Target amount, row ${index + 1}">`;
+    openModal({
+      title: "Add multiple targets",
+      intro: "Fill one row per target. Blank rows are ignored. A target that already exists for the same branch, month and brand is replaced. Use / to combine brands; a category suffix applies only to its own brand. Scoped targets exclude that category from general brand targets. CON- prefixes count with the base brand.",
+      submitLabel: "Save targets",
+      wide: true,
+      body: `${fieldHTML("Type", "type", selectHTML("type", [["branch", "Branch targets (all brands)"], ["brand", "Brand targets"]], "branch"))}
+        ${fieldHTML("Month", "month", `<input name="month" type="month" value="${month}" required>`)}
+        <div class="bulk-users-head"><strong>Targets</strong><button class="button button-outline button-small" type="button" id="bulk-add-rows">+ Add more rows</button></div>
+        <datalist id="brand-options">${knownBrands().map(brand => `<option value="${escapeHTML(brand)}"></option>`).join("")}</datalist>
+        <div class="bulk-grid bulk-grid-3">
+          <span class="bulk-label">Branch</span><span class="bulk-label">Brand (brand targets only)</span><span class="bulk-label">Target amount (₱)</span>
+          <span id="bulk-rows" style="display:contents">${[0, 1, 2, 3, 4].map(rowHTML).join("")}</span>
+        </div>`,
+      onReady: form => {
+        let count = 5;
+        const sync = () => {
+          const isBrand = form.elements.type.value === "brand";
+          form.querySelectorAll('[name$="_brand"]').forEach(input => { input.disabled = !isBrand; });
+        };
+        form.elements.type.addEventListener("change", sync);
+        form.querySelector("#bulk-add-rows").addEventListener("click", () => {
+          const holder = document.createElement("span");
+          holder.style.display = "contents";
+          holder.innerHTML = [0, 1, 2, 3, 4].map(offset => rowHTML(count + offset)).join("");
+          form.querySelector("#bulk-rows").appendChild(holder);
+          count += 5;
+          sync();
+          holder.querySelector("select")?.focus();
+        });
+        form.bulkCount = () => count;
+        sync();
+      },
+      onSubmit: async form => {
+        const isBrand = form.elements.type.value === "brand";
+        const monthDate = `${form.elements.month.value}-01`;
+        const records = new Map();
+        for (let index = 0; index < form.bulkCount(); index += 1) {
+          const branchValue = form.elements[`t${index}_branch`]?.value || "";
+          const brand = isBrand ? titleCase((form.elements[`t${index}_brand`]?.value || "").trim()) : "";
+          const amountText = (form.elements[`t${index}_amount`]?.value || "").trim();
+          if (!branchValue && !brand && !amountText) continue;
+          if (!branchValue) throw new Error(`Row ${index + 1}: choose a branch.`);
+          if (isBrand && !brand) throw new Error(`Row ${index + 1}: enter the brand.`);
+          const amount = Number(amountText);
+          if (!amountText || !Number.isFinite(amount) || amount < 0) throw new Error(`Row ${index + 1}: enter a valid target amount.`);
+          (branchValue === "all" ? branches.map(branch => branch.id) : [branchValue]).forEach(id => {
+            records.set(isBrand ? `${id}|${brand.toLowerCase()}` : id, {
+              dealer_id: currentProfile.dealer_id, branch_id: id, month: monthDate, amount, created_by: currentProfile.id, ...(isBrand ? { brand } : {}),
+            });
+          });
+        }
+        if (!records.size) throw new Error("Enter at least one target.");
+        const result = await client
+          .from(isBrand ? "brand_targets" : "monthly_targets")
+          .upsert([...records.values()], { onConflict: isBrand ? "branch_id,month,brand" : "branch_id,month" });
+        if (result.error) throw result.error;
+        await refreshData();
+      },
+    });
+  }
+
+  // ---------- People: districts, branches, users ----------
+  function openDistrictModal() {
+    openModal({
+      title: "Add district",
+      submitLabel: "Create district",
+      body: fieldHTML("District name", "name", '<input name="name" required autocomplete="off">'),
+      onSubmit: async form => {
+        mustRpc(await client.rpc("create_district", { p_name: uppercaseEntry(form.elements.name.value) }));
+        await refreshData();
+      },
+    });
+  }
+
+  function openBranchModal() {
+    if (!liveData.districts.length) {
+      openModal({ title: "Add branch", body: "<p>Create a district first.</p>", submitLabel: "OK", onSubmit: async () => {} });
+      return;
+    }
+    openModal({
+      title: "Add branch",
+      intro: "The new branch starts with the shared product catalog.",
+      submitLabel: "Create branch",
+      body: `${fieldHTML("District", "district", selectHTML("district", liveData.districts.map(item => [item.id, item.name]), ui.district))}
+        ${fieldHTML("Branch name", "name", '<input name="name" required autocomplete="off">')}
+        ${fieldHTML("Branch code (e.g. STG)", "code", '<input name="code" required pattern="[A-Za-z][A-Za-z0-9]{1,9}" minlength="2" maxlength="10" autocomplete="off" placeholder="2–10 letters/numbers, starting with a letter">')}`,
+      onSubmit: async form => {
+        mustRpc(await client.rpc("create_branch", { p_district_id: form.elements.district.value, p_name: uppercaseEntry(form.elements.name.value), p_code: form.elements.code.value.trim().toUpperCase() }));
+        await refreshData();
+      },
+    });
+  }
+
+  function openGeoEditModal(kind, id) {
+    if (kind === "district") {
+      const item = liveData.districts.find(entry => entry.id === id);
+      if (!item) return;
+      openModal({
+        title: "Update district",
+        submitLabel: "Save changes",
+        body: fieldHTML("District name", "name", `<input name="name" required autocomplete="off" value="${escapeHTML(item.name)}">`),
+        onSubmit: async form => {
+          mustRpc(await client.rpc("update_district", { p_id: id, p_name: uppercaseEntry(form.elements.name.value) }));
+          await refreshData();
+        },
+      });
+      return;
+    }
+    const item = liveData.branches.find(entry => entry.id === id);
+    if (!item) return;
+    openModal({
+      title: "Update branch",
+      intro: "Moving a branch to another district also moves its staff.",
+      submitLabel: "Save changes",
+      body: `${fieldHTML("District", "district", selectHTML("district", liveData.districts.map(entry => [entry.id, entry.name]), item.district_id))}
+        ${fieldHTML("Branch name", "name", `<input name="name" required autocomplete="off" value="${escapeHTML(item.name)}">`)}
+        ${fieldHTML("Branch code", "code", `<input name="code" required pattern="[A-Za-z][A-Za-z0-9]{1,9}" minlength="2" maxlength="10" autocomplete="off" value="${escapeHTML(item.code || "")}" ${item.transfer_sequence > 0 ? "readonly" : ""}>`)}
+        <p class="an-note">Branch codes must be unique in your company. After a numbered transfer, its source code is locked to preserve references.</p>`,
+      onSubmit: async form => {
+        mustRpc(await client.rpc("update_branch", { p_id: id, p_district_id: form.elements.district.value, p_name: uppercaseEntry(form.elements.name.value), p_code: form.elements.code.value.trim().toUpperCase() }));
+        await refreshData();
+      },
+    });
+  }
+
+  function openGeoDeleteModal(kind, id) {
+    const item = (kind === "district" ? liveData.districts : liveData.branches).find(entry => entry.id === id);
+    if (!item) return;
+    openModal({
+      title: `Delete ${kind}`,
+      intro: `Delete ${kind} "${item.name}"? This cannot be undone. A ${kind} that still has ${kind === "district" ? "branches or users" : "users or sales"} cannot be deleted.`,
+      submitLabel: "Delete",
+      body: "",
+      onSubmit: async () => {
+        mustRpc(await client.rpc(kind === "district" ? "delete_district" : "delete_branch", { p_id: id }));
+        await refreshData();
+      },
+    });
+  }
+
+  function openUserModal() {
+    if (!liveData.districts.length) {
+      openModal({ title: "Add user", body: "<p>Create a district (and a branch for BM / PS users) before adding users.</p>", submitLabel: "OK", onSubmit: async () => {} });
+      return;
+    }
+    openModal({
+      title: "Add user",
+      intro: "A temporary password is generated and shown once. The user can change it after signing in.",
+      submitLabel: "Create user",
+      body: `${fieldHTML("Role", "role", selectHTML("role", [["ps", "Product Specialist (PS)"], ["manager", "Branch Manager (BM)"], ["district_manager", "District Manager (DM)"], ["inventory_controller", "Inventory Controller"], ["stock_custodian", "Stock Custodian"]], "ps"))}
+        ${fieldHTML("Full name", "name", '<input name="name" required autocomplete="off">')}
+        ${fieldHTML("Login ID (username or mobile number)", "email", '<input name="email" autocomplete="off" autocapitalize="none">')}
+        ${fieldHTML("Email (to send the invite, optional)", "contact", '<input name="contact" type="email" autocomplete="off" autocapitalize="none">')}
+        ${fieldHTML("District", "district", selectHTML("district", liveData.districts.map(item => [item.id, item.name]), ui.district))}
+        <div id="branch-field">${fieldHTML("Branch", "branch", '<select name="branch"></select>')}</div>
+        <div id="inventory-branches-field" hidden>${inventoryAssignmentFields([])}</div>
+        <div id="user-sales-code-field">${fieldHTML("Salesperson Code / PS username", "salesperson_code", '<input name="salesperson_code" required autocomplete="off" placeholder="Exact code from the sales database">')}
+          <label class="check-row"><input type="checkbox" name="test_account"> Test account (Salesperson Code optional)</label></div>
+        <div id="user-brand-field">${fieldHTML("Brand (for brand monitoring)", "brand", `<input name="brand" list="brand-options" autocomplete="off" placeholder="e.g. Lg, Lg - Aircon, or Midea / Toshiba"><datalist id="brand-options">${knownBrands().map(brand => `<option value="${escapeHTML(brand)}"></option>`).join("")}</datalist>`)}</div>`,
+      onReady: form => {
+        const syncLogin = () => {
+          const ps = form.elements.role.value === "ps", code = form.elements.salesperson_code.value.trim();
+          form.elements.salesperson_code.required = ps && !form.elements.test_account.checked;
+          form.elements.email.readOnly = ps && (!form.elements.test_account.checked || !!code);
+          if (form.elements.email.readOnly) form.elements.email.value = code;
+        };
+        const sync = () => {
+          const role = form.elements.role.value;
+          const onlyInventory = ["inventory_controller", "stock_custodian"].includes(role);
+          const branches = liveData.branches.filter(branch => branch.district_id === form.elements.district.value);
+          form.elements.branch.innerHTML = branches.length
+            ? branches.map(branch => `<option value="${escapeHTML(branch.id)}">${escapeHTML(branch.name)}</option>`).join("")
+            : '<option value="">No branches in this district</option>';
+          form.querySelector("#branch-field").hidden = role === "district_manager" || onlyInventory;
+          form.elements.district.closest(".field").hidden = onlyInventory;
+          form.querySelector("#inventory-branches-field").hidden = !onlyInventory;
+          form.querySelector("#user-brand-field").hidden = role !== "ps";
+          form.querySelector("#user-sales-code-field").hidden = role !== "ps";
+          syncLogin();
+        };
+        form.elements.salesperson_code.addEventListener("input", syncLogin);
+        form.elements.test_account.addEventListener("change", syncLogin);
+        form.elements.role.addEventListener("change", sync);
+        form.elements.district.addEventListener("change", sync);
+        sync();
+      },
+      onSubmit: async form => {
+        const role = form.elements.role.value;
+        const onlyInventory = ["inventory_controller", "stock_custodian"].includes(role);
+        const contactEmail = form.elements.contact.value.trim().toLowerCase();
+        const salesCode = form.elements.salesperson_code.value.trim();
+        const testAccount = role === "ps" && form.elements.test_account.checked;
+        if (role === "ps" && !salesCode && !testAccount) throw new Error("Salesperson Code is required for a Product Specialist unless marked as a test account.");
+        const loginId = role === "ps" && salesCode ? salesCode : form.elements.email.value.trim() || contactEmail;
+        if (!loginId) throw new Error("Enter a login ID (username or mobile number) or an email address.");
+        const body = {
+          role,
+          full_name: uppercaseEntry(form.elements.name.value),
+          login: loginId,
+          email: contactEmail,
+          app_url: location.origin + location.pathname,
+          district_id: form.elements.district.value,
+        };
+        if (onlyInventory) {
+          body.branch_ids = [...form.elements.inventory_branches.selectedOptions].map(option => option.value);
+          body.district_id = null;
+          if (!body.branch_ids.length) throw new Error("Assign at least one inventory branch.");
+        } else if (role !== "district_manager") {
+          if (!form.elements.branch.value) throw new Error("Create a branch in this district first.");
+          body.branch_id = form.elements.branch.value;
+        }
+        if (role === "ps") {
+          body.salesperson_code = form.elements.salesperson_code.value.trim() || null;
+          body.test_account = testAccount;
+          body.brand = uppercaseEntry(form.elements.brand.value);
+          if (!body.brand) throw new Error("Enter the brand this Product Specialist represents.");
+        }
+        const { data, error } = await client.functions.invoke("admin-create-user", { body });
+        if (error) {
+          let detail = error.message;
+          try { detail = (await error.context.json()).error || detail; } catch { /* keep message */ }
+          throw new Error(detail);
+        }
+        if (data?.error) throw new Error(data.error);
+        await refreshData();
+        if (demoStore) return `<p><strong>${escapeHTML(body.full_name)}</strong> was added to this local demo only. No real account, login or email was created.</p>`;
+        const mailNote = !contactEmail ? "No email was entered, so no invite was sent."
+          : data.email_status === "sent" ? `An invite email was sent to ${contactEmail}.`
+          : data.email_status === "not_configured" ? `No invite email was sent because the email service is not connected yet. Share the details below with the user yourself.`
+          : `The invite email could not be sent (${data.email_status}). Share the details below yourself.`;
+        return `<p><strong>${escapeHTML(body.full_name)}</strong> was created.</p>
+          <p>Login ID: <strong>${escapeHTML(body.login)}</strong><br>Temporary password: <code class="temp-password">${escapeHTML(data.temporary_password)}</code></p>
+          ${invitationLink(data.invitation_url)}
+          <p class="dlg-intro">${escapeHTML(mailNote)} Copy the password now; it will not be shown again.</p>`;
+      },
+    });
+  }
+
+  function openBulkUsersModal() {
+    if (!liveData.districts.length) {
+      openModal({ title: "Add multiple users", body: "<p>Create a district and a branch before adding users.</p>", submitLabel: "OK", onSubmit: async () => {} });
+      return;
+    }
+    const rowHTML = index => ["Full name", "Login ID", "Email (optional)", "Brand", "Salesperson Code"].map((label, col) =>
+      `<input name="u${index}_${col}" placeholder="${label}" aria-label="${label}, user ${index + 1}" autocomplete="off"${col === 3 ? ' list="brand-options"' : ""}${col === 1 || col === 2 ? ' autocapitalize="none"' : ""}>`).join("") + `<label class="bulk-test-account"><input type="checkbox" name="u${index}_test" aria-label="Test account, user ${index + 1}">Test account</label>`;
+    openModal({
+      title: "Add multiple users",
+      intro: "Fill one row per person. Everyone gets the same role, district and branch. Blank rows are ignored. PS accounts require brand and Salesperson Code; the code becomes their username. Test accounts may leave the code blank and enter a Login ID.",
+      submitLabel: "Create users",
+      wide: true,
+      body: `${fieldHTML("Role", "role", selectHTML("role", [["ps", "Product Specialist (PS)"], ["manager", "Branch Manager (BM)"], ["district_manager", "District Manager (DM)"], ["inventory_controller", "Inventory Controller"], ["stock_custodian", "Stock Custodian"]], "ps"))}
+        ${fieldHTML("District", "district", selectHTML("district", liveData.districts.map(item => [item.id, item.name]), ui.district))}
+        <div id="branch-field">${fieldHTML("Branch", "branch", '<select name="branch"></select>')}</div>
+        <div id="inventory-branches-field" hidden>${inventoryAssignmentFields([])}</div>
+        <div class="bulk-users-head"><strong>Users</strong><button class="button button-outline button-small" type="button" id="bulk-add-rows">+ Add more users</button></div>
+        <datalist id="brand-options">${knownBrands().map(brand => `<option value="${escapeHTML(brand)}"></option>`).join("")}</datalist>
+        <div class="bulk-grid bulk-grid-sales-code" id="bulk-grid">
+          <span class="bulk-label">Full name</span><span class="bulk-label">Login ID</span><span class="bulk-label">Email (optional)</span><span class="bulk-label">Brand</span><span class="bulk-label">Salesperson Code</span><span class="bulk-label">Test account</span>
+          <span id="bulk-rows" style="display:contents">${[0, 1, 2, 3, 4].map(rowHTML).join("")}</span>
+        </div>
+        <p class="dlg-preview" id="bulk-progress" hidden></p>`,
+      onReady: form => {
+        let count = 5;
+        const syncLogins = () => {
+          const ps = form.elements.role.value === "ps";
+          for (let index = 0; index < count; index += 1) {
+            const login = form.elements[`u${index}_1`], code = form.elements[`u${index}_4`], test = form.elements[`u${index}_test`];
+            test.disabled = !ps;
+            login.readOnly = ps && (!test.checked || !!code.value.trim());
+            if (login.readOnly) login.value = code.value.trim();
+          }
+        };
+        const sync = () => {
+          const role = form.elements.role.value;
+          const onlyInventory = ["inventory_controller", "stock_custodian"].includes(role);
+          const branches = liveData.branches.filter(branch => branch.district_id === form.elements.district.value);
+          form.elements.branch.innerHTML = branches.length
+            ? branches.map(branch => `<option value="${escapeHTML(branch.id)}">${escapeHTML(branch.name)}</option>`).join("")
+            : '<option value="">No branches in this district</option>';
+          form.querySelector("#branch-field").hidden = role === "district_manager" || onlyInventory;
+          form.elements.district.closest(".field").hidden = onlyInventory;
+          form.querySelector("#inventory-branches-field").hidden = !onlyInventory;
+          form.querySelectorAll('[name$="_3"],[name$="_4"]').forEach(input => { input.disabled = role !== "ps"; });
+          syncLogins();
+        };
+        form.querySelector("#bulk-grid").addEventListener("input", syncLogins);
+        form.querySelector("#bulk-grid").addEventListener("change", syncLogins);
+        form.elements.role.addEventListener("change", sync);
+        form.elements.district.addEventListener("change", sync);
+        form.querySelector("#bulk-add-rows").addEventListener("click", () => {
+          const holder = document.createElement("span");
+          holder.style.display = "contents";
+          holder.innerHTML = [0, 1, 2, 3, 4].map(offset => rowHTML(count + offset)).join("");
+          form.querySelector("#bulk-rows").appendChild(holder);
+          count += 5;
+          sync();
+          holder.querySelector("input")?.focus();
+        });
+        form.bulkCount = () => count;
+        sync();
+      },
+      onSubmit: async form => {
+        const role = form.elements.role.value;
+        const onlyInventory = ["inventory_controller", "stock_custodian"].includes(role);
+        const rows = [];
+        for (let index = 0; index < form.bulkCount(); index += 1) {
+          const value = col => (form.elements[`u${index}_${col}`]?.value || "").trim();
+          const entry = { name: value(0), login: value(1), email: value(2), brand: value(3), salesCode: value(4), testAccount: role === "ps" && form.elements[`u${index}_test`].checked, line: index + 1 };
+          if (entry.name || entry.login || entry.email || entry.brand || entry.salesCode) rows.push(entry);
+        }
+        if (!rows.length) throw new Error("Enter at least one user.");
+        if (rows.length > 40) throw new Error("Add up to 40 users at a time.");
+        if (!onlyInventory && role !== "district_manager" && !form.elements.branch.value) throw new Error("Create a branch in this district first.");
+        const branchIds = onlyInventory ? Array.from(form.elements.inventory_branches.selectedOptions, option => option.value) : [];
+        if (onlyInventory && !branchIds.length) throw new Error("Assign at least one inventory branch.");
+        const progress = form.querySelector("#bulk-progress");
+        progress.hidden = false;
+        const results = [];
+        for (let index = 0; index < rows.length; index += 1) {
+          const entry = rows[index];
+          progress.textContent = `Creating ${index + 1} of ${rows.length}…`;
+          try {
+            const contactEmail = entry.email.toLowerCase();
+            if (role === "ps" && !entry.salesCode && !entry.testAccount) throw new Error("Salesperson Code is required unless marked as a test account.");
+            const loginId = role === "ps" && entry.salesCode ? entry.salesCode : entry.login || contactEmail;
+            if (!entry.name) throw new Error("Missing full name.");
+            if (!loginId) throw new Error("Missing login ID or email.");
+            const body = { role, full_name: uppercaseEntry(entry.name), login: loginId, email: contactEmail, app_url: location.origin + location.pathname, district_id: onlyInventory ? null : form.elements.district.value };
+            if (onlyInventory) body.branch_ids = branchIds;
+            else if (role !== "district_manager") body.branch_id = form.elements.branch.value;
+            if (role === "ps") {
+              body.salesperson_code = entry.salesCode || null;
+              body.test_account = entry.testAccount;
+              body.brand = uppercaseEntry(entry.brand);
+              if (!body.brand) throw new Error("Missing brand.");
+            }
+            const data = await invokeAdminFunction(body);
+            results.push({ name: body.full_name, login: loginId, password: data.temporary_password, invitation: data.invitation_url, error: "" });
+          } catch (error) {
+            results.push({ name: entry.name || `Row ${entry.line}`, login: entry.login, password: "", error: error.message });
+          }
+        }
+        await refreshData();
+        const made = results.filter(item => !item.error);
+        const csv = ["Name,Login ID,Temporary password,Invitation link", ...made.map(item => [item.name, item.login, item.password, item.invitation ?? ""].map(value => `"${String(value).replace(/"/g, '""')}"`).join(","))].join("\r\n");
+        const link = made.length ? `<p><a class="button button-outline button-small" download="new-users.csv" href="data:text/csv;charset=utf-8,${encodeURIComponent(csv)}">Download list (CSV)</a></p>` : "";
+        return `<p><strong>${made.length}</strong> of ${results.length} user(s) created. ${demoStore ? "Demo accounts only. The displayed credentials are placeholders; no real logins or emails were created." : "Copy or download the passwords now; they will not be shown again."}</p>${link}
+          <div class="connected-table-wrap"><table class="connected-table"><thead><tr><th>Name</th><th>Login ID</th><th>Temporary password</th><th>Result</th></tr></thead><tbody>${results.map(item => `<tr><td>${escapeHTML(item.name)}</td><td>${escapeHTML(item.login)}</td><td>${item.error ? "—" : `<code class="temp-password">${escapeHTML(item.password)}</code>`}</td><td>${item.error ? `<span class="an-down">${escapeHTML(item.error)}</span>` : invitationLink(item.invitation) || "Created"}</td></tr>`).join("")}</tbody></table></div>`;
+      },
+    });
+  }
+
+  function invitationLink(url) {
+    return /^https:\/\/kzamora19\.github\.io\/branchline\/accept-invitation\.html#token=[a-f0-9]{64}$/.test(url ?? "")
+      ? `<p>Share this invitation link with the recipient. They must accept within 48 hours.<br><input type="url" readonly aria-label="Invitation link" value="${escapeHTML(url)}"></p>` : "";
+  }
+
+  // Keep identical to loginEmail() in the admin-create-user Edge Function.
+  function loginEmail(raw) {
+    const value = String(raw || "").trim().toLowerCase();
+    if (value.includes("@")) return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value) ? value : "";
+    if (/^\+?[\d\s-]{7,20}$/.test(value)) {
+      let digits = value.replace(/\D/g, "");
+      if (digits.startsWith("0")) digits = `63${digits.slice(1)}`;
+      return digits.length >= 7 && digits.length <= 15 ? `${digits}@login.branchline.app` : "";
+    }
+    return /^[a-z0-9._-]{3,40}$/.test(value) ? `${value}@login.branchline.app` : "";
+  }
+
+  async function invokeAdminFunction(body) {
+    const { data, error } = await client.functions.invoke("admin-create-user", { body });
+    if (error) {
+      let detail = error.message;
+      try { detail = (await error.context.json()).error || detail; } catch { /* keep message */ }
+      throw new Error(detail);
+    }
+    if (data?.error) throw new Error(data.error);
+    return data;
+  }
+
+  function inventoryAssignmentFields(selected) {
+    return fieldHTML("Assigned inventory branches (select one or more)", "inventory_branches",
+      `<select name="inventory_branches" multiple size="${Math.min(8, Math.max(3, liveData.branches.length))}">${liveData.branches.map(branch =>
+        `<option value="${escapeHTML(branch.id)}" ${selected.includes(branch.id) ? "selected" : ""}>${escapeHTML(branch.name)}</option>`).join("")}</select>`);
+  }
+
+  function openPersonAction(kind, person) {
+    if (kind === "invite") {
+      openModal({
+        title: `Reissue invitation · ${person.full_name}`,
+        intro: "This replaces the pending invitation link. The user keeps their existing temporary password.",
+        body: "",
+        submitLabel: "Reissue invitation",
+        onSubmit: async () => {
+          const data = await invokeAdminFunction({ action: "resend_invitation", user_id: person.id });
+          return `<p>${data.email_status === "sent" ? "The new invitation was emailed." : "Share the new link with the user."}</p>${invitationLink(data.invitation_url)}`;
+        },
+      });
+      return;
+    }
+    const role = person.role;
+    if (kind === "delete") {
+      openModal({
+        title: `Delete ${person.full_name}`,
+        intro: "This permanently removes the account and their login. It only works for users with no recorded sales, targets or edits; otherwise use Disable. This cannot be undone.",
+        body: "",
+        submitLabel: "Delete user",
+        onSubmit: async () => {
+          await invokeAdminFunction({ action: "delete_user", user_id: person.id });
+          await refreshData();
+        },
+      });
+      return;
+    }
+    if (kind === "toggle") {
+      const disabling = person.active;
+      openModal({
+        title: `${disabling ? "Disable" : "Restore"} ${person.full_name}`,
+        intro: disabling
+          ? "They will no longer be able to see or enter anything. Their records are kept and you can enable them again."
+          : "They will be able to sign in again with their current role and branch.",
+        body: "",
+        submitLabel: disabling ? "Disable account" : "Restore account",
+        onSubmit: async () => {
+          mustRpc(await client.rpc("admin_set_user_status", { p_user_id: person.id, p_active: !disabling }));
+          await refreshData();
+        },
+      });
+      return;
+    }
+    if (kind === "transfer") {
+      if (["inventory_controller", "stock_custodian"].includes(role)) {
+        openModal({
+          title: `Assign inventory branches · ${person.full_name}`,
+          intro: "These assignments grant inventory access only, never sales or prices.",
+          body: inventoryAssignmentFields((liveData.inventoryAssignments || []).filter(row => row.user_id === person.id).map(row => row.branch_id)),
+          onSubmit: async form => {
+            mustRpc(await client.rpc("assign_inventory_branches", { p_user: person.id, p_branches: [...form.elements.inventory_branches.selectedOptions].map(option => option.value) }));
+            await refreshData();
+          },
+        });
+        return;
+      }
+      const currentBranch = role === "ps" ? person.branch_id : liveData.managerLinks.find(link => link.manager_id === person.id)?.branch_id;
+      const policy = {
+        ps: "Their past sales stay with the old branch. In the new branch they start from zero and cannot see earlier records.",
+        manager: "Takes effect immediately: they lose access to the old branch and manage the new one. The old branch's history stays with the branch and the assignment is recorded.",
+        district_manager: "Takes effect immediately: they lose the old district and cover the new one.",
+      }[role];
+      openModal({
+        title: `Transfer ${person.full_name}`,
+        intro: policy,
+        submitLabel: "Transfer",
+        body: `${fieldHTML("New district", "district", selectHTML("district", liveData.districts.map(item => [item.id, item.name]), person.district_id))}
+          <div id="transfer-branch">${fieldHTML("New branch", "branch", '<select name="branch"></select>')}</div>`,
+        onReady: form => {
+          const sync = () => {
+            const branches = liveData.branches.filter(branch => branch.district_id === form.elements.district.value);
+            form.elements.branch.innerHTML = branches.map(branch =>
+              `<option value="${escapeHTML(branch.id)}" ${branch.id === currentBranch ? "selected" : ""}>${escapeHTML(branch.name)}</option>`).join("")
+              || '<option value="">No branches in this district</option>';
+            form.querySelector("#transfer-branch").hidden = role === "district_manager";
+          };
+          form.elements.district.addEventListener("change", sync);
+          sync();
+        },
+        onSubmit: async form => {
+          mustRpc(await client.rpc("admin_transfer_user", {
+            p_user_id: person.id,
+            p_district_id: form.elements.district.value,
+            p_branch_id: role === "district_manager" ? null : form.elements.branch.value || null,
+          }));
+          await refreshData();
+        },
+      });
+      return;
+    }
+
+    const isPs = role === "ps";
+    openModal({
+      title: `Update ${person.full_name}`,
+      intro: `${roleLabels[role] || role}. Use Transfer to change district or branch.`,
+      submitLabel: "Update",
+      body: `${fieldHTML("Full name", "name", `<input name="name" required autocomplete="off" value="${escapeHTML(person.full_name)}">`)}
+        ${`${fieldHTML("Login ID (username, mobile number or email)", "login", `<input name="login" autocomplete="off" value="${escapeHTML(person.login_id || "")}" placeholder="${person.login_id ? "" : "Email on file; enter a new login ID to change"}">`)}
+        ${fieldHTML("Contact email (for invites)", "contact", `<input name="contact" type="email" autocomplete="off" value="${escapeHTML(person.email || "")}">`)}`}
+        ${isPs ? fieldHTML("Brand", "brand", `<input name="brand" required list="edit-brands" autocomplete="off" placeholder="e.g. Lg, Lg - Aircon, or Midea / Toshiba" value="${escapeHTML(person.assigned_brand || "")}"><datalist id="edit-brands">${knownBrands().map(brand => `<option value="${escapeHTML(brand)}"></option>`).join("")}</datalist>`) : ""}
+        ${isPs ? fieldHTML("Salesperson Code (optional)", "salesperson_code", `<input name="salesperson_code" autocomplete="off" value="${escapeHTML(person.salesperson_code || "")}" placeholder="Exact code from the sales database">`) : ""}
+        ${role === "admin" ? "" : '<label class="check-row"><input type="checkbox" name="reset"> <span>Reset password (a new temporary password is shown once)</span></label>'}`,
+      onSubmit: async form => {
+        mustRpc(await client.rpc(isPs ? "admin_update_profile_with_sales_code" : "admin_update_profile", {
+          p_user_id: person.id,
+          p_full_name: uppercaseEntry(form.elements.name.value),
+          p_role: role,
+          p_district_id: person.district_id,
+          p_branch_id: isPs ? person.branch_id : null,
+          p_assigned_brand: isPs ? uppercaseEntry(form.elements.brand.value) : null,
+          ...(isPs ? { p_salesperson_code: form.elements.salesperson_code.value.trim() || null } : {}),
+        }));
+        {
+          const login = form.elements.login.value.trim();
+          const contact = form.elements.contact.value.trim();
+          if (login !== (person.login_id || "") || contact !== (person.email || "")) {
+            await invokeAdminFunction({ action: "update_contact", user_id: person.id, login, contact_email: contact });
+          }
+        }
+        let result = "";
+        if (form.elements.reset?.checked) {
+          const data = await invokeAdminFunction({ action: "reset_password", user_id: person.id });
+          result = demoStore ? "<p>Demo-only simulation. No real password was changed.</p>" : `<p>New temporary password for <strong>${escapeHTML(form.elements.name.value.trim())}</strong>:<br><code class="temp-password">${escapeHTML(data.temporary_password)}</code></p><p class="dlg-intro">Copy it now; it will not be shown again.</p>`;
+        }
+        await refreshData();
+        return result;
+      },
+    });
+  }
+
+  function openForgotPasswordModal() {
+    openModal({
+      title: "Reset your password",
+      intro: "Enter your login ID and the contact email registered by your administrator. We will email a one-time reset link; your current password stays unchanged until you choose a new one.",
+      submitLabel: "Send reset link",
+      body: fieldHTML("Login ID (email, username or mobile)", "login", `<input name="login" required autocomplete="username" value="${escapeHTML(loginForm.elements.email.value)}">`)
+        + fieldHTML("Registered contact email", "email", '<input name="email" type="email" required autocomplete="email">'),
+      onSubmit: async form => {
+        const { error } = await client.functions.invoke("password-recovery", {
+          body: { login: form.elements.login.value.trim(), email: form.elements.email.value.trim() },
+        });
+        if (error) throw new Error("Could not request a reset link. Please try again later or contact your administrator.");
+        return "<p>If those details match an active account, a reset link will arrive at the registered email. Check your spam folder too. If no email arrives, ask your administrator to verify your contact email.</p>";
+      },
+    });
+  }
+
+  function openPasswordModal(recovery = false) {
+    openModal({
+      title: recovery ? "Choose your new password" : "Change password",
+      submitLabel: "Update password",
+      body: `${fieldHTML("New password", "password", '<input name="password" type="password" minlength="8" required autocomplete="new-password">')}
+        ${fieldHTML("Confirm password", "confirm", '<input name="confirm" type="password" minlength="8" required autocomplete="new-password">')}`,
+      onSubmit: async form => {
+        if (form.elements.password.value !== form.elements.confirm.value) throw new Error("The passwords do not match.");
+        const { error } = await client.auth.updateUser({ password: form.elements.password.value });
+        if (error) throw error;
+        passwordRecoveryPending = false;
+        return "<p>Your password was updated.</p>";
+      },
+    });
+  }
+
+  // ---------- Export ----------
+  function exportButton(attributes, label) {
+    return `<button class="button button-outline button-small export-icon" type="button" ${attributes} title="${escapeHTML(label)}" aria-label="${escapeHTML(label)}" aria-haspopup="menu" aria-expanded="false"><span class="export-glyph" aria-hidden="true"></span></button>`;
+  }
+
+  function chartExport(title, rows) {
+    if (ui.salesBasis === "srp") rows = [...rows, ["Comparison basis", salesBasisNote()]];
+    return `<div class="chart-download">${exportButton(`data-chart-download="${escapeHTML(title)}" data-chart-rows="${escapeHTML(JSON.stringify(rows))}"`, `Download ${title}`)}</div>`;
+  }
+
+  function exportError(error) {
+    console.error("Branchline download failed.", error);
+    alert(`Download failed: ${error.message || "Please try again."}`);
+  }
+
+  let exportMenu;
+
+  function closeExportMenu(restoreFocus = false) {
+    if (!exportMenu) return;
+    const { menu, trigger, events } = exportMenu;
+    exportMenu = null;
+    events.abort();
+    menu.remove();
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.removeAttribute("aria-controls");
+    if (restoreFocus && trigger.isConnected) trigger.focus({ preventScroll: true });
+  }
+
+  function chooseExportFormat(trigger, run, includeImage = false) {
+    const sameButton = exportMenu?.trigger === trigger;
+    closeExportMenu(sameButton);
+    if (sameButton) return;
+
+    const profileId = currentProfile?.id;
+    const exportClient = client;
+    const menu = document.createElement("div");
+    const events = new AbortController();
+    exportMenu = { menu, trigger, events };
+    menu.id = "branchline-export-formats";
+    menu.className = "export-format-menu";
+    menu.setAttribute("popover", "manual");
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", "Export formats");
+    menu.innerHTML = `<button type="button" role="menuitem" tabindex="-1" value="excel">Excel</button>
+      <button type="button" role="menuitem" tabindex="-1" value="pdf">PDF</button>
+      ${includeImage ? '<button type="button" role="menuitem" tabindex="-1" value="png">PNG</button>' : ""}`;
+    const options = [...menu.querySelectorAll("button")];
+
+    menu.addEventListener("click", async event => {
+      const option = event.target.closest("[role=menuitem]");
+      if (!option) return;
+      event.stopPropagation();
+      closeExportMenu(true);
+      if (currentProfile?.id !== profileId || client !== exportClient || !trigger.isConnected) return;
+      trigger.disabled = true;
+      try { await run(option.value); } catch (error) { exportError(error); }
+      finally {
+        trigger.disabled = false;
+        if (trigger.isConnected && document.activeElement === document.body) trigger.focus({ preventScroll: true });
+      }
+    });
+    menu.addEventListener("keydown", event => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeExportMenu(true);
+      } else if (event.key === "Tab") {
+        closeExportMenu(true);
+      } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+        event.preventDefault();
+        const index = options.indexOf(document.activeElement);
+        if (event.key === "Home") options[0].focus();
+        else if (event.key === "End") options.at(-1).focus();
+        else options[(index + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length].focus();
+      }
+    });
+    const position = () => {
+      const rect = trigger.getBoundingClientRect();
+      if (!trigger.isConnected || !rect.width || rect.bottom < 0 || rect.top > innerHeight) {
+        closeExportMenu();
+        return;
+      }
+      const edge = 8, gap = 4;
+      menu.style.left = Math.max(edge, Math.min(rect.right - menu.offsetWidth, innerWidth - menu.offsetWidth - edge)) + "px";
+      const below = rect.bottom + gap;
+      const top = below + menu.offsetHeight <= innerHeight - edge ? below : rect.top - menu.offsetHeight - gap;
+      menu.style.top = Math.max(edge, top) + "px";
+    };
+    document.addEventListener("pointerdown", event => {
+      if (!menu.contains(event.target) && !trigger.contains(event.target)) closeExportMenu();
+    }, { capture: true, signal: events.signal });
+    window.addEventListener("resize", position, { signal: events.signal });
+    window.addEventListener("scroll", position, { capture: true, signal: events.signal });
+    trigger.after(menu);
+    menu.showPopover();
+    trigger.setAttribute("aria-controls", menu.id);
+    trigger.setAttribute("aria-expanded", "true");
+    position();
+    if (menu.isConnected) options[0].focus({ preventScroll: true });
+  }
+
+  function loadExportScript(url, integrity, label) {
+    return new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = url;
+      script.integrity = "sha384-" + integrity;
+      script.crossOrigin = "anonymous";
+      script.onload = resolve;
+      script.onerror = () => {
+        script.remove();
+        reject(new Error(`The ${label} library could not load. Check your connection and try again.`));
+      };
+      document.head.appendChild(script);
+    });
+  }
+
+  let pdfLibrary;
+  function loadPdfLibrary() {
+    const base = "https://cdn.jsdelivr.net/npm/pdfmake@0.2.20/build/";
+    pdfLibrary ??= (async () => {
+      if (!window.pdfMake?.createPdf) await loadExportScript(base + "pdfmake.min.js", "G23ofMOEI98f9UnroUBjDi6Ll55Y5E6bOX4VAMJo0nIbuQRIxzn0g4athUOb58zs", "PDF");
+      await loadExportScript(base + "vfs_fonts.js", "pv+tpy6KGI5sKXJDf7oGPdvyVNKYXfAmDYpZ3r3PNP0d13PJQ6YMiiAEndd5sU15", "PDF");
+      return window.pdfMake;
+    })().catch(error => { pdfLibrary = undefined; throw error; });
+    return pdfLibrary;
+  }
+
+  // Format monetary export columns consistently while preserving quantities,
+  // dates, barcodes and other identifiers as authored.
+  function moneyExportColumn(label) {
+    const text = String(label || "").trim().toLowerCase();
+    if (/^(no\.? of sales|number of sales|salesperson|sales code|sales date|qty|quantity|transactions|invoice|barcode|serial|model|month|year)/.test(text)) return false;
+    return /(?:\b(?:amount|price|srp|sales|target|revenue|cost|value|subtotal|total|gross profit|net income|total due|downpayment|balance)\b)/.test(text);
+  }
+
+  function exportMoneyNumber(value) {
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+    const raw = String(value ?? "").trim();
+    if (!/^(?:[₱$]\s*)?-?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?$/.test(raw)) return null;
+    const parsed = Number(raw.replace(/[₱$,\s]/g, ""));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function pdfReportCellText(value, heading) {
+    const raw = String(value ?? "").trim();
+    if (/^(?:sales(?:person)? code|barcode|serial(?: numbers?)?|invoice(?: number)?|ps id|branch id|district id|product id|model(?: number)?|date|customer|product specialist|ps name)$/i.test(String(heading || "").trim())) return raw;
+    if (moneyExportColumn(heading)) {
+      const amount = exportMoneyNumber(value);
+      if (amount !== null) return (raw.startsWith("₱") ? "₱" : raw.startsWith("$") ? "$" : "")
+        + amount.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+    // Other fractional metrics may have more precision than fits on a printed report.
+    if (/^(?:moh|progress|share|achievement|growth|conversion rate)$/i.test(String(heading).trim())) {
+      const match = raw.match(/^([+-]?[\d,]+)\.(\d+)(%)?$/);
+      if (match) return Number(match[1].replace(/,/g, "") + "." + match[2]).toLocaleString("en-PH",
+        { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + (match[3] || "");
+    }
+    // Preserve existing print behavior for long fractional generic metrics.
+    const match = raw.match(/^([+-]?\s*[₱$]?\s*)([\d,]+)\.(\d+)(\s*%?)$/);
+    if (!match || match[3].length <= 2) return raw;
+    const amount = Number(match[2].replace(/,/g, "") + "." + match[3]);
+    return Number.isFinite(amount) ? match[1] + amount.toLocaleString("en-PH",
+      { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + match[4] : raw;
+  }
+
+  // Exact widths prevent pdfmake's automatic minimum-word widths from pushing
+  // a wide report's last columns outside the printable page.
+  function reportPdfColumnWidths(headers, pageWidth, horizontalPadding, margin) {
+    const compact = headers.length > 13;
+    const usable = pageWidth - margin * 2 - headers.length * horizontalPadding * 2 - 4;
+    const weight = label => {
+      const text = String(label || "").toLowerCase();
+      if (/^(product|description|model|full description|remarks|notes)/.test(text)) return compact ? 2 : 2.2;
+      if (/^(brand|branch|customer|product specialist|ps name|payment mode|category|sub-category|status)/.test(text)) return 1.35;
+      if (/^(date|day|rank|qty|quantity|moh|progress|rate|available units|transactions)/.test(text)) return 0.85;
+      return 1;
+    };
+    const weights = headers.map(weight);
+    const total = weights.reduce((sum, value) => sum + value, 0);
+    return weights.map(value => usable * value / total);
+  }
+
+  async function downloadReportPdf(sheets, fileName, transaction, options = {}) {
+    const profileId = currentProfile?.id;
+    const exportClient = client;
+    const pdf = await loadPdfLibrary();
+    const maxColumns = Math.max(0, ...sheets.map(sheet => sheet.rows[0]?.length || 0));
+    // Standard Philippine 13 x 8.5-inch paper for 7–13 columns; larger
+    // transaction exports use A3 landscape so every column remains legible.
+    const dense = maxColumns > 13;
+    const wide = maxColumns >= 7;
+    const pageSize = dense ? "A3" : wide ? { width: 13 * 72, height: 8.5 * 72 } : "A4";
+    const pageWidth = dense ? 1190.55 : wide ? 13 * 72 : 595.28;
+    const margin = wide ? 28 : 32;
+    const padding = dense ? 2 : 3;
+    const title = transaction?.name || (sheets.length === 1 ? sheets[0].name : "Sales Tracker report");
+    const content = [
+      { text: "BRANCHLINE  /  SALES TRACKER", fontSize: 10, bold: true, color: "#264c7f" },
+      { text: title, fontSize: 19, bold: true, margin: [0, 4, 0, 14] },
+    ];
+    if (transaction) {
+      const fields = transaction.metadata.map(([label, value]) => ({
+        text: [{ text: label + "  ", bold: true }, value], margin: [0, 0, 0, 6],
+      }));
+      const split = Math.ceil(fields.length / 2);
+      content.push({ columns: [{ stack: fields.slice(0, split) }, { stack: fields.slice(split) }],
+        columnGap: 16, margin: [0, 0, 0, 8] });
+    }
+    if (options.reportCharts?.length) {
+      const { managementPdfChartBlocks } = await import("./management-charts.mjs");
+      content.push(...managementPdfChartBlocks(options.reportCharts));
+    }
+    for (const sheet of sheets) {
+      const [headers, ...rows] = sheet.rows;
+      if (!headers?.length) continue;
+      if (sheet.name !== title) content.push({ text: sheet.name, bold: true, fontSize: 11, margin: [0, 8, 0, 4] });
+      const numericColumn = label => /^(?:qty|quantity|srp|unit price|price|amount|total|moh|available units|progress|sales|target|share|monthly sell-out)/i.test(label);
+      // Align both header and data cells for inventory brand metric columns.
+      // Keep Branch, Brand and Status labels left-aligned.
+      const centeredBrandMetric = label => /^(?:available units|priced stock\s*\(srp\)|completed sell-out\s*\(srp\)|monthly sell-out\s*\(srp\)|3-month target\s*\(srp\)|moh|stock units missing srp|sell-out units missing srp|unmatched sell-out units)$/i.test(String(label).trim());
+      const widths = reportPdfColumnWidths(headers, pageWidth, padding, margin);
+      const rowCells = (row, isHeader) => headers.map((label, index) => ({
+        text: isHeader ? String(label) : pdfReportCellText(row[index], label),
+        bold: isHeader,
+        alignment: centeredBrandMetric(label) ? "center" : !isHeader && numericColumn(label) ? "right" : "left",
+        noWrap: false, // headings and values must wrap instead of overflowing
+        fontSize: isHeader ? (dense ? 7.5 : wide ? 8.5 : 9.5) : (dense ? 7.5 : wide ? 9 : 10),
+      }));
+      content.push({
+        table: { headerRows: 1, widths, body: [rowCells(headers, true), ...rows.map(row => rowCells(row, false))],
+          dontBreakRows: true },
+        layout: {
+          fillColor: row => row === 0 ? "#e8eff8" : null,
+          hLineColor: () => "#c2cede", vLineWidth: () => 0,
+          paddingLeft: () => padding, paddingRight: () => padding, paddingTop: () => 4, paddingBottom: () => 4,
+        },
+      });
+    }
+    if (transaction) content.push({ unbreakable: true, columns: transaction.totals.map((value, index) => ({
+      text: value, alignment: index === 0 ? "left" : "right", bold: index > 0,
+    })), margin: [0, 10, 0, 0] });
+    const blob = await new Promise((resolve, reject) => {
+      try {
+        pdf.createPdf({
+          info: { title, author: "Branchline Sales Tracker" },
+          pageSize, pageOrientation: wide ? "landscape" : "portrait",
+          pageMargins: [margin, 32, margin, 35], content,
+          defaultStyle: { fontSize: dense ? 7.5 : wide ? 9 : 10, color: "#16243a" },
+          footer: (page, total) => ({ text: `${page} / ${total}`, alignment: "right", fontSize: 8, margin: [margin, 7, margin, 0] }),
+        }).getBlob(resolve);
+      } catch (error) { reject(error); }
+    });
+    if (currentProfile?.id === profileId && client === exportClient) downloadFile(fileName + ".pdf", blob);
+  }
+
+  function tableElementSheet(table, name) {
+    const copy = table.cloneNode(true);
+    copy.querySelectorAll(".sort-arrow").forEach(arrow => arrow.remove());
+    copy.querySelectorAll(".pl-meta, .sale-detail-barcode, .sale-product-serials > div").forEach(line => {
+      if (line.previousSibling) line.before("\n");
+      if (line.matches(".pl-meta")) line.after("\n");
+    });
+    return { name, rows: [...copy.querySelectorAll("tr")].map(row => [...row.children].map(cell => cell.textContent.trim())) };
+  }
+
+  let excelReportLibrary;
+  async function downloadTransactionExcel(name, metadata, rows, totals, filename) {
+    const profileId = currentProfile?.id;
+    const exportClient = client;
+    excelReportLibrary ??= loadExportScript("https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js",
+      "Pqp51FUN2/qzfxZxBCtF0stpc9ONI6MYZpVqmo8m20SoaQCzf+arZvACkLkirlPz", "Excel")
+      .catch(error => { excelReportLibrary = undefined; throw error; });
+    await excelReportLibrary;
+    if (currentProfile?.id !== profileId || client !== exportClient) return;
+
+    const workbook = new window.ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet("Transaction", {
+      views: [{ showGridLines: false }],
+      pageSetup: { paperSize: 9, orientation: "portrait", fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
+    });
+    const widths = [56, 34, 8, 18];
+    sheet.columns = widths.map(width => ({ width }));
+    const bodyFont = { name: "Arial", size: 11, color: { argb: "FF16243A" } };
+    const pesoFormat = '"₱"#,##0.00;-"₱"#,##0.00';
+    const lineCount = (text, width) => String(text).split("\n")
+      .reduce((total, line) => total + Math.max(1, Math.ceil(line.length / (width - 6))), 0);
+    const fullWidthLabel = (label, font, height) => {
+      const row = sheet.addRow([label]);
+      sheet.mergeCells(row.number, 1, row.number, 4);
+      row.font = { ...bodyFont, ...font };
+      row.height = height;
+    };
+    fullWidthLabel("BRANCHLINE  /  SALES TRACKER", { color: { argb: "FF264C7F" }, bold: true }, 19);
+    fullWidthLabel(name, { size: 20, bold: true }, 30);
+    sheet.addRow([]);
+
+    const split = Math.ceil(metadata.length / 2);
+    const field = ([label, value]) => ({ richText: [
+      { text: label + "  ", font: { ...bodyFont, bold: true } },
+      { text: value, font: bodyFont },
+    ] });
+    for (let index = 0; index < split; index++) {
+      const left = metadata[index];
+      const right = metadata[index + split];
+      const row = sheet.addRow([field(left), right ? field(right) : ""]);
+      sheet.mergeCells(row.number, 2, row.number, 4);
+      row.alignment = { vertical: "top", wrapText: true };
+      const size = ([label, value]) => label + "  " + value;
+      row.height = Math.max(lineCount(size(left), widths[0]),
+        right ? lineCount(size(right), widths.slice(1).reduce((sum, width) => sum + width, 0)) : 1) * 15 + 3;
+    }
+
+    sheet.addRow([]);
+    fullWidthLabel("Products", { bold: true }, 21);
+    const [headings, ...items] = rows;
+    const header = sheet.addRow(headings);
+    header.height = 21;
+    header.eachCell(cell => {
+      cell.font = { ...bodyFont, bold: true };
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE8EFF8" } };
+    });
+    for (const [product, serial, quantity, price] of items) {
+      const amount = price == null ? null : parseCurrency(String(price).replace(/[₱\s]/g, ""));
+      const row = sheet.addRow([product, serial, quantity == null ? null : Number(quantity), amount ?? price]);
+      row.font = bodyFont;
+      row.height = Math.max(lineCount(product, widths[0]), lineCount(serial ?? "", widths[1])) * 15 + 5;
+      row.alignment = { vertical: "top", wrapText: true };
+      row.getCell(4).numFmt = pesoFormat;
+      for (let column = 1; column <= 4; column++) {
+        row.getCell(column).border = { bottom: { style: "thin", color: { argb: "FFC2CEDE" } } };
+      }
+    }
+
+    const summary = sheet.addRow([`Total quantity: ${totals.quantity}`, "Transaction total", "", totals.amount]);
+    sheet.mergeCells(summary.number, 2, summary.number, 3);
+    summary.font = { ...bodyFont, bold: true };
+    summary.height = 24;
+    summary.getCell(2).alignment = { horizontal: "right" };
+    summary.getCell(4).numFmt = pesoFormat;
+    sheet.pageSetup.printArea = `A1:D${summary.number}`;
+    const bytes = await workbook.xlsx.writeBuffer();
+    if (currentProfile?.id === profileId && client === exportClient) {
+      downloadFile(filename + ".xlsx", new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+    }
+  }
+
+  function dailyComparisonSheet(name, body, headers = ["Date", "This year", "Last year date", "Last year", "Change"], footer = "") {
+    const template = document.createElement("template");
+    template.innerHTML = `<table><thead><tr>${headers.map(header => `<th>${escapeHTML(header)}</th>`).join("")}</tr></thead><tbody>${body}</tbody>${footer}</table>`;
+    return tableElementSheet(template.content.querySelector("table"), name);
+  }
+
+  function wireDialogExport(root, title) {
+    const button = root.querySelector("[data-download-dialog]");
+    button.addEventListener("click", () => chooseExportFormat(button, format => {
+        const table = root.querySelector("table");
+        if (!table) throw new Error("The daily table is unavailable.");
+        const sheet = tableElementSheet(table, title);
+        if (title === "Traffic and transactions by day") sheet.includeIdentity = false;
+        return exportWorkbook([sheet], `branchline-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${localISODate()}`, false, format);
+    }));
+  }
+
+  async function downloadChart(button) {
+    const card = button.closest(".connected-panel");
+    if (!card) throw new Error("This chart is no longer available.");
+    const profileId = currentProfile.id;
+    const exportClient = client;
+    const title = button.dataset.chartDownload;
+    const filename = `branchline-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${localISODate()}`;
+    const original = card.querySelector(".pie-body svg, .daily-sales-chart");
+    const daily = original?.classList.contains("daily-sales-chart");
+    const width = daily ? Math.max(1000, original.viewBox.baseVal.width + 40) : 1000;
+    const textLines = (text, x, y, maxChars, size = 16, weight = 400) => {
+      const lines = [];
+      for (const word of String(text || "").split(/\s+/)) {
+        if (!lines.length || lines.at(-1).length + word.length + 1 > maxChars) lines.push(word);
+        else lines[lines.length - 1] += ` ${word}`;
+      }
+      return { height: lines.length * (size + 7), svg: lines.map((line, index) => `<text x="${x}" y="${y + index * (size + 7)}" font-size="${size}" font-weight="${weight}">${escapeHTML(line)}</text>`).join("") };
+    };
+    const heading = textLines(title, 24, 34, Math.floor(width / 16), 24, 700);
+    const subtitleText = [card.querySelector(".connected-panel-heading p")?.textContent, ui.salesBasis === "srp" ? salesBasisNote() : ""].filter(Boolean).join(" · ");
+    const subtitle = textLines(subtitleText, 24, heading.height + 42, Math.floor(width / 9), 16);
+    const chartTop = heading.height + subtitle.height + 60;
+    let graphic = "";
+    if (original) {
+      const clone = original.cloneNode(true);
+      const originals = [original, ...original.querySelectorAll("*")];
+      const copies = [clone, ...clone.querySelectorAll("*")];
+      originals.forEach((element, index) => {
+        const style = getComputedStyle(element);
+        copies[index].setAttribute("style", ["fill", "stroke", "stroke-width", "font-family", "font-size", "font-weight", "text-anchor", "dominant-baseline"]
+          .map(key => `${key}:${style.getPropertyValue(key)}`).join(";"));
+      });
+      clone.querySelectorAll(".daily-bar-hit").forEach(element => element.remove());
+      clone.setAttribute("x", "24");
+      clone.setAttribute("y", String(chartTop));
+      clone.setAttribute("width", String(daily ? width - 48 : 400));
+      clone.setAttribute("height", String(daily ? 320 : 400));
+      clone.style.minWidth = "0";
+      graphic = new XMLSerializer().serializeToString(clone);
+    } else {
+      graphic = textLines(card.querySelector(".empty-state")?.textContent || "No data for this selection.", 24, chartTop + 40, 90).svg;
+    }
+    let legendTop = chartTop + 20;
+    card.querySelectorAll(".pie-legend li").forEach(item => {
+      const color = getComputedStyle(item.querySelector("i")).backgroundColor;
+      const line = textLines(`${item.querySelector("span")?.textContent || ""}: ${item.querySelector("strong")?.textContent || ""}`, 470, legendTop, 50, 16, 500);
+      graphic += `<rect x="446" y="${legendTop - 13}" width="14" height="14" rx="3" fill="${escapeHTML(color)}"/>${line.svg}`;
+      legendTop += line.height + 15;
+    });
+    const footerTop = Math.max(chartTop + (daily ? 360 : 430), legendTop + 20);
+    const note = [...card.querySelectorAll(".an-note")].map(element => element.textContent).join(" ");
+    const footer = textLines(note, 24, footerTop, Math.floor(width / 9), 15);
+    const height = footerTop + footer.height + 28;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" font-family="Segoe UI, Arial, sans-serif" fill="#162033"><rect width="100%" height="100%" fill="#fff"/>${heading.svg}${subtitle.svg}${graphic}${footer.svg}</svg>`;
+    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
+    try {
+      const image = new Image();
+      image.src = url;
+      await image.decode();
+      const canvas = document.createElement("canvas");
+      canvas.width = width * 2;
+      canvas.height = height * 2;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Your browser could not create the chart image.");
+      context.fillStyle = "#fff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      const png = await new Promise(resolve => canvas.toBlob(resolve, "image/png"));
+      if (!png) throw new Error("Your browser could not encode the chart image.");
+      if (currentProfile?.id !== profileId || client !== exportClient) throw new Error("The account changed during export. Start again after signing in.");
+      downloadFile(`${filename}.png`, png);
+    } finally { URL.revokeObjectURL(url); }
+  }
+
+  function exportPsIdentity(record) {
+    const profiles = liveData.profiles || [];
+    const id = record.ps_id;
+    const code = String(record.salesperson_code || "").trim();
+    const name = String(record.ps_name || "").trim();
+    const candidates = profiles.filter(person => person.role === "ps"
+      && (!record.branch_id || person.branch_id === record.branch_id)
+      && (code ? String(person.salesperson_code || "").trim() === code : name && person.full_name?.trim().toLowerCase() === name.toLowerCase()));
+    const person = (id ? profiles.find(person => person.id === id) || (currentProfile?.id === id ? currentProfile : null) : null)
+      || (candidates.length === 1 ? candidates[0] : null);
+    return [code || String(person?.salesperson_code || ""), person?.full_name || name];
+  }
+
+  function itemizedSaleLines(entries) {
+    const serialsUnavailable = liveData.exportWarnings?.includes("Serial numbers");
+    if (serialsUnavailable) console.warn("Sales export: serial numbers failed to load; serial cells will be blank.");
+    return entries.flatMap(({ sale, line }) => {
+      const peers = linesForSale(sale.id).filter(item => item.barcode === line.barcode);
+      const index = peers.indexOf(line);
+      if (index < 0) throw new Error("A sale line changed during export. Reopen the report and try again.");
+      const quantity = Number(line.quantity);
+      if (peers.some(item => !Number.isSafeInteger(Number(item.quantity)) || Number(item.quantity) === 0)) throw new Error(`Invoice ${sale.invoice_number || sale.id}: product quantity is invalid.`);
+      const serials = serialsUnavailable ? [] : serialsFor(sale.id, line.barcode);
+      const total = peers.reduce((sum, item) => sum + Math.abs(Number(item.quantity)), 0);
+      const start = peers.slice(0, index).reduce((sum, item) => sum + Math.abs(Number(item.quantity)), 0);
+      const units = Math.abs(quantity), sign = Math.sign(quantity);
+      const assigned = serialsUnavailable ? [] : liveData.returnSerialsByLine?.get(line.id) ||
+        (serials.length > total ? [] : serials.slice(start, start + units));
+      if (assigned.length > units) throw new Error(`Invoice ${sale.invoice_number || sale.id}: return audit serial count is invalid.`);
+      return [...assigned.map(serial => ({ sale, line: { ...line, quantity: sign }, serial })),
+        ...(units > assigned.length ? [{ sale, line: { ...line, quantity: sign * (units - assigned.length) }, serial: "" }] : [])];
+    });
+  }
+
+  function brandLogExportSheet(items, name = "Brand branch-wide") {
+    return { name, rows: [
+      ["Date", "Invoice", "Brand", "Category", "Sub-category", "Product", "Qty", "Barcode", "Serial number", "Sales code", "PS name"],
+      ...items.flatMap(row => {
+        const quantity = Number(row.quantity);
+        if (!Number.isSafeInteger(quantity) || quantity === 0) throw new Error(`Invoice ${row.invoice_number}: product quantity is invalid.`);
+        const recorded = row.serial_numbers || [];
+        const serials = recorded.length > Math.abs(quantity) ? [] : recorded;
+        const sign = Math.sign(quantity);
+        const units = [...serials.map(serial => ({ serial, quantity: sign })),
+          ...(Math.abs(quantity) > serials.length ? [{ serial: "", quantity: sign * (Math.abs(quantity) - serials.length) }] : [])];
+        return units.map(unit => [row.sold_on, row.invoice_number, row.brand, row.category, row.sub_category,
+          row.model_description, unit.quantity, row.barcode || "", unit.serial, ...exportPsIdentity(row)]);
+      }),
+    ] };
+  }
+
+  function exportWorkbook(sheets, fileName, includeIndex = false, format = "excel") {
+    if (ui.salesBasis === "srp" && !["inventory_controller", "stock_custodian"].includes(currentProfile?.role)) {
+      sheets = [{ name: "Comparison basis", rows: [["Sales comparison basis", salesBasisNote()], ["Original records", "Raw unit prices, entry/edit forms, targets and DG fees are unchanged."]] }, ...sheets];
+    }
+    // Preserve the columns authored by each report. PS identity appears only in itemized sales exports.
+    if (format === "pdf") return downloadReportPdf(sheets, fileName);
+    if (window.XLSX) {
+      const book = window.XLSX.utils.book_new();
+      const names = new Set(includeIndex ? ["worksheet index"] : []);
+      const index = [["Worksheet", "Full report name"]];
+      sheets.forEach(sheet => {
+        const worksheet = window.XLSX.utils.aoa_to_sheet(sheet.rows);
+        const headings = sheet.rows[0] || [];
+        if (typeof window.XLSX.utils.encode_cell === "function") headings.forEach((heading, columnIndex) => {
+          if (!moneyExportColumn(heading)) return;
+          for (let rowIndex = 1; rowIndex < sheet.rows.length; rowIndex += 1) {
+            const address = window.XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex });
+            const cell = worksheet[address];
+            if (!cell) continue;
+            const number = exportMoneyNumber(cell.v);
+            if (number === null) continue;
+            cell.v = number;
+            cell.t = "n";
+            cell.z = "#,##0.00";
+          }
+        });
+        worksheet["!cols"] = sheet.rows[0].map((_, index) => ({
+          wch: Math.min(40, Math.max(10, ...sheet.rows.slice(0, 200).map(row => String(row[index] ?? "").length))),
+        }));
+        const base = sheet.name.replace(/[\\/?*[\]:]/g, " ").trim().replace(/^'+|'+$/g, "") || "Table";
+        let name = base.slice(0, 31);
+        for (let suffix = 2; names.has(name.toLowerCase()); suffix += 1) name = `${base.slice(0, 31 - String(suffix).length - 1)} ${suffix}`;
+        names.add(name.toLowerCase());
+        index.push([name, sheet.name]);
+        window.XLSX.utils.book_append_sheet(book, worksheet, name);
+      });
+      if (includeIndex) {
+        const worksheet = window.XLSX.utils.aoa_to_sheet(index);
+        worksheet["!cols"] = [{ wch: 33 }, { wch: 90 }];
+        window.XLSX.utils.book_append_sheet(book, worksheet, "Worksheet index");
+      }
+      window.XLSX.writeFile(book, `${fileName}.xlsx`);
+    } else {
+      // Offline fallback: one CSV per sheet.
+      sheets.forEach(sheet => downloadFile(`${fileName} - ${sheet.name}.csv`, new Blob([csvText(sheet.rows.map((row, index) => index === 0 ? row : row.map((value, col) => moneyExportColumn(sheet.rows[0]?.[col]) && exportMoneyNumber(value) !== null ? exportMoneyNumber(value).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : value)))], { type: "text/csv" })));
+    }
+  }
+
+  async function fetchExportBrandLog(exportClient, profileId) {
+    const rows = [];
+    for (let offset = 0; ; offset += 1000) {
+      const result = await exportClient.rpc("export_brand_branch_sales_v2").order("line_id").range(offset, offset + 999);
+      if (currentProfile?.id !== profileId || client !== exportClient) throw new Error("The account changed during export. Start again after signing in.");
+      if (result.error) {
+        if (["PGRST202", "42883"].includes(result.error.code)) throw new Error("The complete brand sales log needs the database update. Ask your administrator to apply migration 20261204000000.");
+        throw new Error(`Unable to load the full brand sales log: ${result.error.message || "database request failed"}`);
+      }
+      rows.push(...result.data);
+      if (result.data.length < 1000) return rows;
+    }
+  }
+
+  async function exportAllTables(format = "excel") {
+    if (format === "excel" && !window.XLSX) throw new Error("Excel export is unavailable. Connect to the internet and reload before using Export All.");
+    if (!liveData || !currentProfile) throw new Error("Sign in and wait for your workspace to finish loading.");
+    if (liveData.inventoryError) throw new Error(liveData.inventoryError);
+    if (["inventory_controller", "stock_custodian"].includes(currentProfile.role)) {
+      return exportWorkbook(inventorySheets(), `branchline-inventory-${localISODate()}`, true, format);
+    }
+    if (liveData.exportWarnings?.length) throw new Error(`Some datasets failed to load (${liveData.exportWarnings.join(", ")}). Reload successfully before exporting all tables.`);
+    const completeBrandLog = currentProfile.role === "ps" ? await fetchExportBrandLog(client, currentProfile.id) : [];
+    const savedUi = structuredClone(ui);
+    const savedTables = { ...tableStore };
+    const savedSalesExport = salesLogExport;
+    const savedWalkContext = walkInDailyCtx;
+    const savedBrandLog = liveData.brandSales;
+    const sheets = [];
+    if (liveData.inventoryCatalog) sheets.push(...inventorySheets());
+    const isPs = currentProfile.role === "ps";
+    const ids = new Set(liveData.branches.map(branch => branch.id));
+    const add = (name, headers, rows) => sheets.push({ name, rows: [headers, ...rows] });
+    const records = (name, items, columns) => add(name, columns.map(([label]) => label), items.map(item => columns.map(([, key]) => item[key] ?? "")));
+    const sales = [...visibleSales(), ...liveData.testSales.filter(sale => !isPs || sale.ps_id === currentProfile.id)].filter(sale => ids.has(sale.branch_id));
+    add("Export information", ["Field", "Value"], [
+      ["Account", currentProfile.full_name], ["Role", roleLabels[currentProfile.role]],
+      ["Generated", new Date().toISOString()], ["Scope", "All available dates and role-permitted branches; display filters ignored"],
+      ["Test sales", "Included and explicitly marked in Sales; excluded from performance reports"],
+      ["Reports", "Monthly report worksheets follow each report's normal privacy and history rules. Missing counts remain missing."],
+    ]);
+    records("Branches", liveData.branches, [["Branch ID", "id"], ["Branch", "name"], ["District ID", "district_id"]]);
+    const districtIds = new Set(liveData.branches.map(branch => branch.district_id));
+    records("Districts", liveData.districts.filter(district => districtIds.has(district.id)), [["District ID", "id"], ["District", "name"]]);
+    add(isPs ? "My sales" : "Sales", ["Date", "Invoice", "Customer", "Branch", "Payment", "Brand", "Category", "Sub-category", "Product", "Barcode", "Qty", "SRP", "Unit price", "Amount", "City", "Barangay", "Serials", "Test", "Delivery / Pick up", "Comparison amount", "Sales code", "PS name"],
+      itemizedSaleLines(sales.flatMap(sale => linesForSale(sale.id).map(line => ({ sale, line })))).map(({ sale, line, serial }) => [
+        sale.sold_on, sale.invoice_number, sale.customer_name, branchName(sale.branch_id), sale.payment_mode,
+        line.brand, line.category, line.sub_category, line.model_description, line.barcode, Number(line.quantity), line.srp ?? "",
+        Number(line.selling_price), Number(line.quantity) * Number(line.selling_price), sale.city || "", sale.barangay || "",
+        serial, isTestSale(sale, liveData.testPsIds) ? "Yes" : "No", fulfillmentLabel(sale), window.BranchlineAnalytics.salesLineAmount(line, ui.salesBasis), ...exportPsIdentity(sale),
+      ]));
+    if (["manager", "district_manager", "admin"].includes(currentProfile.role)) sheets.push(deliveryExport(sales));
+    if (isPs) {
+      sheets.push(brandLogExportSheet(completeBrandLog.filter(row => ids.has(row.branch_id))));
+    } else {
+      records("Monthly targets", liveData.targets.filter(row => ids.has(row.branch_id)), [["Branch ID", "branch_id"], ["Month", "month"], ["Target", "amount"]]);
+      records("Brand targets", liveData.brandTargets.filter(row => ids.has(row.branch_id)), [["Branch ID", "branch_id"], ["Month", "month"], ["Brand", "brand"], ["Target", "amount"]]);
+      records("Payment targets", liveData.paymentTargets.filter(row => ids.has(row.branch_id)), [["Branch ID", "branch_id"], ["Month", "month"], ["Mode", "mode"], ["Share (%)", "share_pct"], ["Amount", "amount"]]);
+      records("Products", liveData.products, [["Brand", "brand"], ["Category", "category"], ["Sub-category", "sub_category"], ["Product", "model_description"], ["Barcode", "barcode"], ["SRP", "srp"]]);
+      records("Imported daily history", liveData.dailyHistory.filter(row => ids.has(row.branch_id)).map(row => ({ ...row, ...row.payment_breakdown })), [["Branch ID", "branch_id"], ["Date", "day"], ["Sales", "sales"], ["Transactions", "transactions"], ["Walk-ins", "walkins"], ["Remarks", "remarks"], ...window.BranchlineDailyHistory.PAYMENT_CHANNELS.map(channel => [channel, channel])]);
+      records("Import batches", liveData.importBatches, [["Label", "label"], ["Source file", "source_file"], ["Kind", "kind"], ["Created", "created_at"], ["From", "date_from"], ["To", "date_to"], ["Sales", "sales_count"], ["Lines", "lines_count"], ["Amount", "amount"]]);
+      records("Store walk-ins", liveData.branchWalkins.filter(row => ids.has(row.branch_id)), [["Branch ID", "branch_id"], ["Date", "counted_on"], ["Visitors", "visitors"]]);
+    }
+    records("Clients assisted", liveData.psWalkins.filter(row => ids.has(row.branch_id) && (!isPs || row.ps_id === currentProfile.id)), [["Branch ID", "branch_id"], ["PS ID", "ps_id"], ["Date", "counted_on"], ["Clients assisted", "clients_assisted"]]);
+    records("Store-closed dates", liveData.holidays, [["Date", "date"], ["Label", "label"]]);
+    records("Event calendar", (liveData.calendar?.events || []).filter(row=>!row.branch_ids.length || row.branch_ids.some(id=>ids.has(id))).map(row=>({...row,scope:row.branch_ids.length ? row.branch_ids.map(id=>liveData.branches.find(b=>b.id===id)?.name || "Other scoped branch").join(", ") : "Company-wide",
+      schedule:calendarScheduleLabel(row),memos:(row.memo_links || []).map(link=>`${link.label}: ${link.url}`).join("\n")})),
+      [["Event ID","id"],["Event","title"],["Type","kind"],["Campaign type","campaign_type"],["Start","starts_on"],["End","ends_on"],["Schedule","schedule"],["Scope","scope"],["Store closed","closed"],["Notes","notes"],["Memo links","memos"],["Cancelled","cancelled_at"]]);
+    records("Event approval audit",(liveData.calendar?.adjustments || []).filter(row=>ids.has(row.branch_id)).map(row=>({...row,events:row.event_snapshot.map(event=>event.title).join(", ")})),
+      [["Branch ID","branch_id"],["Category","category"],["Month","month"],["Events","events"],["Adjustment %","percent"],["Justification","reason"],["Approved by","approved_by"],["Approved at","approved_at"],["Revoked at","revoked_at"]]);
+    records("Payment modes", liveData.paymentModes, [["Name", "name"], ["Position", "position"]]);
+    if (currentProfile.role === "admin") {
+      records("People and access", liveData.profiles, [["Name", "full_name"], ["Role", "role"], ["District ID", "district_id"], ["Branch ID", "branch_id"], ["Assigned brand", "assigned_brand"], ["Salesperson Code", "salesperson_code"], ["Active", "active"], ["Login", "login_id"], ["Email", "email"]]);
+      records("Manager branches", liveData.managerLinks, [["Manager ID", "manager_id"], ["Branch ID", "branch_id"]]);
+      records("Push messages", liveData.pushMessages, [["Status", "status"], ["Message", "message"], ["Created", "created_at"]]);
+      records("Push schedules", liveData.pushSchedules, [["Send at", "send_at"], ["Active", "active"], ["Created", "created_at"]]);
+    }
+    const months = new Set([currentMonth()]);
+    [sales.map(row => row.sold_on), liveData.targets.map(row => row.month), completeBrandLog.map(row => row.sold_on), liveData.psWalkins.map(row => row.counted_on),
+      ...(!isPs ? [liveData.brandTargets.map(row => row.month), liveData.paymentTargets.map(row => row.month), liveData.dailyHistory.map(row => row.day), liveData.branchWalkins.map(row => row.counted_on)] : [])]
+      .flat().forEach(date => { if (/^\d{4}-\d{2}/.test(date || "")) months.add(date.slice(0, 7)); });
+    try {
+      collectingExports = true;
+      if (isPs) liveData.brandSales = completeBrandLog;
+      Object.keys(ui).forEach(key => { ui[key] = typeof ui[key] === "object" ? {} : ""; });
+      ui.salesBasis = savedUi.salesBasis;
+      ui.period = "month";
+      ui.anBasis = "all";
+      const appendRegistered = month => {
+        Object.entries(tableStore).forEach(([key, table]) => {
+          if (key === "sales") return;
+          sheets.push({ ...tableToSheet(table, `${month} ${table.title || key}`) });
+        });
+      };
+      for (const month of [...months].sort()) {
+        ui.month = month;
+        ui.dsMonth = month.slice(5, 7);
+        ui.dsYear = month.slice(0, 4);
+        Object.keys(tableStore).forEach(key => delete tableStore[key]);
+        const overview = renderOverview();
+        brandPerformancePanel();
+        renderSalesPage(true);
+        walkInDailyCtx = null;
+        renderAnalyticsPage();
+        if (!isPs) {
+          renderTargetsPage();
+          branchPerformancePanel();
+        }
+        appendRegistered(month);
+        if (walkInDailyCtx) {
+          [openWalkInDailyModal()].forEach(sheet => {
+            sheets.push({ ...sheet, name: `${month} ${sheet.name}` });
+          });
+        }
+        const template = document.createElement("template");
+        template.innerHTML = overview;
+        template.content.querySelectorAll("[data-chart-download]").forEach(button => {
+          sheets.push({ name: `${month} ${button.dataset.chartDownload}`, rows: JSON.parse(button.dataset.chartRows) });
+        });
+      }
+    } finally {
+      collectingExports = false;
+      Object.keys(ui).forEach(key => delete ui[key]);
+      Object.assign(ui, savedUi);
+      Object.keys(tableStore).forEach(key => delete tableStore[key]);
+      Object.assign(tableStore, savedTables);
+      salesLogExport = savedSalesExport;
+      walkInDailyCtx = savedWalkContext;
+      liveData.brandSales = savedBrandLog;
+    }
+    return exportWorkbook(sheets, `branchline-export-all-${localISODate()}`, true, format);
+  }
+
+  function psNameOf(psId, fallbackName = "") {
+    return liveData.profiles.find(profile => profile.id === psId)?.full_name || (psId && psId === currentProfile.id ? currentProfile.full_name : titleCase(fallbackName || "") || "—");
+  }
+
+  function exportSales(format = "excel") {
+    if (currentProfile.role === "ps" && liveData.brandSalesError) throw new Error(liveData.brandSalesError);
+    const stamp = localISODate();
+    const sales = visibleSales().filter(sale => !salesLogExport || salesLogExport.has(sale.id));
+    const detail = [["Sale date", "Invoice", "Customer", "District", "Branch", "Brand", "Category", "Sub-category", "Product", "Barcode", "Qty", "SRP", "Unit price", "Amount", "Mode of payment", "City / town", "Barangay", "Serial numbers", "Delivery / Pick up", "Sales code", "PS name"]];
+    const byBranch = new Map();
+    const byBrand = new Map();
+    sales.forEach(sale => {
+      linesForSale(sale.id).forEach(line => {
+        const amount = window.BranchlineAnalytics.salesLineAmount(line, ui.salesBasis);
+        addTo(byBranch, branchName(sale.branch_id), amount);
+        addTo(byBrand, (line.brand || "Unbranded").trim(), amount);
+      });
+    });
+    itemizedSaleLines(sales.flatMap(sale => linesForSale(sale.id).map(line => ({ sale, line })))).forEach(({ sale, line, serial }) => {
+      detail.push([sale.sold_on, sale.invoice_number, sale.customer_name, branchDistrictName(sale.branch_id), branchName(sale.branch_id), line.brand, line.category || "", line.sub_category || "", line.model_description, line.barcode, Number(line.quantity), line.srp == null ? "" : Number(line.srp), Number(line.selling_price), window.BranchlineAnalytics.salesLineAmount(line, ui.salesBasis), sale.payment_mode || "", sale.city || "", sale.barangay || "", serial, fulfillmentLabel(sale), ...exportPsIdentity(sale)]);
+    });
+    const sheets = [{ name: currentProfile.role === "ps" ? "My sales" : "Sales", rows: detail }];
+    if (["manager", "district_manager", "admin"].includes(currentProfile.role)) sheets.push(deliveryExport(sales));
+    if (currentProfile.role === "ps") {
+      sheets.push(brandLogExportSheet(liveData.brandSales));
+    } else {
+      sheets.push({ name: "By branch", rows: [["Branch", "Sales"], ...[...byBranch].sort((a, b) => b[1] - a[1])] });
+      sheets.push({ name: "By brand", rows: [["Brand", "Sales"], ...[...byBrand].sort((a, b) => b[1] - a[1])] });
+    }
+    return exportWorkbook(sheets, `branchline-sales-${stamp}`, false, format);
+  }
+
+  // Pop-up with one Product Specialist's sales (every brand), filterable and sortable by brand, category and sub-category.
+  function openPsDetailModal(psId) {
+    const person = liveData.profiles.find(item => item.id === psId);
+    if (!person) return;
+    openBreakdownModal({
+      title: `${person.full_name} · sales`,
+      intro: `${person.assigned_brand || "—"} · ${person.branch_id ? branchName(person.branch_id) : "—"} · ${periodLabel()}. Every brand this Product Specialist sold in the branch. Sort the columns to see which brand, category or sub-category sold most.`,
+      all: psSaleLines(psId),
+      state: { brand: ui.rankBrand, category: ui.rankCategory, sub: ui.rankSub },
+      fileBase: `branchline-${person.full_name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-sales`,
+      sheet: "PS sales",
+      showBrand: true,
+    });
+    // Individual certificates remain accessible from the table's name/detail
+    // dialog even though the redundant Top Performer cards were removed.
+    if (!demoStore && activePage === "overview"
+      && ["manager", "district_manager", "admin"].includes(currentProfile?.role)
+      && psAwardRankingRows(scopeBranchIds()).some(row => row.id === psId)) {
+      const actions = modalRoot?.querySelector(".dlg-head-actions");
+      if (actions) {
+        const certificate = document.createElement("button");
+        certificate.type = "button";
+        certificate.className = "button button-outline";
+        certificate.textContent = "Certificate PDF";
+        certificate.setAttribute("aria-label", "Download certificate for " + person.full_name);
+        certificate.addEventListener("click", () => {
+          void downloadTopPsCertificates(psId).catch(error => {
+            console.error("Individual certificate export failed.", error);
+            alert(error.message || "Certificate export failed.");
+          });
+        });
+        actions.prepend(certificate);
+      }
+    }
+  }
+
+  // Pop-up with one brand's sales in the current view, broken down by category and sub-category.
+  function openBrandDetailModal(row) {
+    const { brandDetail: brand, brandRange, brandFrom, brandThrough } = row.dataset;
+    const ids = row.closest('[data-table-key="brands"]') ? panelIds("brandBranch", scopeBranchIds()) : scopeBranchIds();
+    const I = window.BranchlineInventory;
+    const assigned = I.brandParts(brand, liveData.products);
+    const keyOf = parts => parts.map(part => `${part.brand}${part.scope ? ` - ${part.scope}` : ""}`).sort().join(" / ");
+    const key = keyOf(assigned);
+    const claimed = new Map();
+    liveData.brandTargets.filter(row => ids.has(row.branch_id)).forEach(row => {
+      const parts = I.brandParts(row.brand, liveData.products);
+      if (keyOf(parts) === key) return;
+      const period = `${row.branch_id}|${row.month.slice(0, 7)}`;
+      if (!claimed.has(period)) claimed.set(period, []);
+      claimed.get(period).push(...parts);
+    });
+    const all = [];
+    visibleSales().forEach(sale => {
+      if (!ids.has(sale.branch_id)) return;
+      if (brandRange !== "all" && (brandFrom ? sale.sold_on < brandFrom || sale.sold_on > brandThrough : !inStatus(sale.sold_on))) return;
+      linesForSale(sale.id).forEach(line => {
+        const item = { ...line, brand: line.brand || "Unbranded" };
+        if (I.matchesBrandParts(item, assigned, claimed.get(`${sale.branch_id}|${sale.sold_on.slice(0, 7)}`) || [])) all.push({ sale, line });
+      });
+    });
+    openBreakdownModal({
+      title: `${brand} · sales`,
+      intro: `${brandRange === "all" ? "All time" : brandFrom ? `${brandFrom} to ${brandThrough}` : periodLabel()} · ${currentProfile.role === "ps" ? "Your recorded sales" : "Sales in the selected branches"}.`,
+      all,
+      state: { brand: "", category: "", sub: "" },
+      fileBase: `branchline-${brand.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-sales`,
+      sheet: "Brand sales",
+      showBrand: true,
+    });
+  }
+
+  function openBreakdownModal({ title, intro, all, state, fileBase, sheet, showBrand }) {
+    const rankingKey = "sales-detail-ranking";
+    const linesKey = "sales-detail-lines";
+    const detailPageSize = 5;
+    const lineScope = all.filter(({ line }) => lineMatches(line, state));
+    const groupOptions = [["all", showBrand ? "Brand, category and sub-category" : "Category and sub-category"], ...(showBrand ? [["brand", "Brand only"]] : []), ["category", "Category only"], ["sub", "Sub-category only"]];
+    const labels = { brand: "Brand", category: "Category", sub: "Sub-category" };
+    const valueOf = (line, key) => String(line[key === "sub" ? "sub_category" : key] ?? "").trim() || "—";
+    const amountOf = ({ line }) => window.BranchlineAnalytics.salesLineAmount(line, ui.salesBasis);
+    let group = "all";
+    let brand = null;
+    let category = null;
+
+    const resetTables = () => {
+      for (const key of [rankingKey, linesKey]) {
+        ui.pages[key] = 1;
+        delete ui.sort[key];
+        delete ui.columnFilters[key];
+      }
+    };
+    resetTables();
+    closeModal();
+    modalRoot = document.createElement("div");
+    modalRoot.className = "dlg-backdrop";
+    const root = modalRoot;
+    root.innerHTML = `<div class="dlg dlg-xwide sales-breakdown-dialog" role="dialog" aria-modal="true" aria-labelledby="sales-breakdown-title">
+      <div class="dlg-head"><h2 id="sales-breakdown-title">${escapeHTML(title)}</h2>
+        <div class="dlg-head-actions">${exportButton('id="ps-detail-export"', `Download ${title}`)}<button class="dlg-close" type="button" aria-label="Close" data-modal-close>×</button></div></div>
+      <div class="dlg-form" id="ps-detail">
+        <div class="sales-breakdown-context">
+          <p class="dlg-intro">${escapeHTML(intro)}</p>
+          <p class="an-note">${escapeHTML(salesBasisNote())}</p>
+          <div class="sales-breakdown-controls">
+            <label class="field"><span>Group by</span><select data-group>${groupOptions.map(([value, label]) => `<option value="${value}">${escapeHTML(label)}</option>`).join("")}</select></label>
+            <button class="button button-outline button-small" type="button" data-breakdown-back hidden>Back</button>
+            <p class="ps-total" data-breakdown-total></p>
+          </div>
+        </div>
+        <div class="sales-breakdown-table" data-breakdown-ranking></div>
+        <div class="sales-breakdown-table" data-breakdown-lines></div>
+      </div></div>`;
+    document.body.appendChild(root);
+    const rankingHost = root.querySelector("[data-breakdown-ranking]");
+    const linesHost = root.querySelector("[data-breakdown-lines]");
+    const back = root.querySelector("[data-breakdown-back]");
+    const rows = () => lineScope.filter(({ line }) =>
+      (brand === null || valueOf(line, "brand") === brand) &&
+      (category === null || valueOf(line, "category") === category));
+    const rankingColumns = () => category !== null ? ["sub"] : brand !== null ? ["category"] :
+      group === "all" ? (showBrand ? ["brand", "category", "sub"] : ["category", "sub"]) : [group];
+    const renderRanking = () => {
+      const keys = rankingColumns();
+      const canDrill = category === null && (brand !== null || group === "brand");
+      const totals = new Map();
+      for (const entry of rows()) {
+        const parts = keys.map(key => valueOf(entry.line, key));
+        const id = JSON.stringify(parts);
+        const item = totals.get(id) ?? { parts, amount: 0, qty: 0 };
+        item.amount += amountOf(entry);
+        item.qty += Number(entry.line.quantity);
+        totals.set(id, item);
+      }
+      const entries = [...totals.values()].sort((a, b) => b.amount - a.amount || natural(a.parts.join(" "), b.parts.join(" ")));
+      const sum = entries.reduce((total, entry) => total + entry.amount, 0);
+      const row = entry => `<tr${canDrill ? ` class="sale-summary-row" tabindex="0" data-breakdown-drill="${escapeHTML(entry.parts[0])}" aria-label="${escapeHTML(`View ${brand === null ? "categories" : "sub-categories"} for ${entry.parts[0]}`)}"` : ""}>
+        ${entry.parts.map(value => `<td>${escapeHTML(value)}</td>`).join("")}<td>${entry.qty}</td><td>${formatMoney(entry.amount)}</td><td>${percent(entry.amount, sum, 2)}</td></tr>`;
+      return tableBlock(rankingKey, [...keys.map(key => labels[key]), "Qty", "Sales", "Share"], entries, row, "No sales match these filters.", detailPageSize);
+    };
+    const renderLines = () => tableBlock(linesKey, ["Date", "Invoice", "Brand", "Category", "Sub-category", "Product", "Qty", "Amount"],
+      rows().sort((a, b) => String(b.sale.sold_on).localeCompare(String(a.sale.sold_on))),
+      entry => {
+        const { sale, line } = entry;
+        return `<tr class="sale-summary-row" data-sale-details="${escapeHTML(sale.id)}" tabindex="0" aria-label="View invoice ${escapeHTML(sale.invoice_number)}"><td>${escapeHTML(sale.sold_on)}</td><td><strong>${escapeHTML(sale.invoice_number)}</strong></td><td>${escapeHTML(line.brand)}</td><td>${escapeHTML(line.category || "—")}</td><td>${escapeHTML(line.sub_category || "—")}</td><td>${escapeHTML(line.model_description)}</td><td>${escapeHTML(line.quantity)}</td><td>${formatMoney(amountOf(entry))}</td></tr>`;
+      }, "No sales match these filters.", detailPageSize);
+    const render = (focusRanking = false) => {
+      const list = rows();
+      const heading = category !== null ? `${brand} · ${category} · Sub-category ranking` : brand !== null ? `${brand} · Category ranking` : title;
+      root.querySelector("h2").textContent = heading;
+      back.hidden = brand === null;
+      back.textContent = category === null ? "Back to brands" : "Back to categories";
+      root.querySelector("[data-breakdown-total]").innerHTML = `<span>${list.length} line${list.length === 1 ? "" : "s"}</span>
+        <strong>${formatMoney(list.reduce((sum, entry) => sum + amountOf(entry), 0))}</strong>`;
+      rankingHost.innerHTML = renderRanking();
+      linesHost.innerHTML = renderLines();
+      if (focusRanking) rankingHost.querySelector("th button")?.focus({ preventScroll: true });
+    };
+    bindModalTable(rankingHost, renderRanking);
+    bindModalTable(linesHost, renderLines);
+    const drill = event => {
+      const row = event.target.closest("[data-breakdown-drill]");
+      if (!row || (event.type === "keydown" && !["Enter", " "].includes(event.key))) return;
+      event.preventDefault();
+      if (brand === null) brand = row.dataset.breakdownDrill;
+      else category = row.dataset.breakdownDrill;
+      resetTables();
+      render(true);
+    };
+    rankingHost.addEventListener("click", drill);
+    rankingHost.addEventListener("keydown", drill);
+    root.querySelector(".dlg-close").addEventListener("click", closeModal);
+    back.addEventListener("click", () => {
+      if (category !== null) category = null;
+      else brand = null;
+      resetTables();
+      render(true);
+    });
+    root.addEventListener("pointerdown", event => {
+      if (event.target === root || event.target.closest("[data-modal-close]")) closeModal();
+    });
+    root.addEventListener("input", event => {
+      if (!event.target.matches("[data-group]")) return;
+      group = event.target.value;
+      brand = category = null;
+      resetTables();
+      render();
+    });
+    const download = root.querySelector("#ps-detail-export");
+    download.addEventListener("click", () => chooseExportFormat(download, format => {
+        const header = ["Sale date", "Invoice", "Customer", "Brand", "Category", "Sub-category", "Product", "Barcode", "Qty", "SRP", "Unit price", "Amount", "Mode of payment", "City / town", "Barangay", "Serial numbers", "Sales code", "PS name"];
+        const data = itemizedSaleLines(tableStore[linesKey].items).map(({ sale, line, serial }) => [sale.sold_on, sale.invoice_number, sale.customer_name, line.brand, line.category || "", line.sub_category || "", line.model_description, line.barcode, Number(line.quantity), line.srp == null ? "" : Number(line.srp), Number(line.selling_price), window.BranchlineAnalytics.salesLineAmount(line, ui.salesBasis), sale.payment_mode || "", sale.city || "", sale.barangay || "", serial, ...exportPsIdentity(sale)]);
+        return exportWorkbook([{ name: sheet, rows: [header, ...data] }], `${fileBase}-${localISODate()}`, false, format);
+    }));
+    bindSaleDetailRows(root);
+    render();
+  }
+
+  // Admin: maintain the list of payment modes shown in the sale form.
+  function openPaymentModesModal() {
+    const modes = liveData.paymentModes;
+    openModal({
+      title: "Payment modes",
+      intro: "These are the choices in the sale form's Mode of payment. Removing a mode does not change past sales.",
+      submitLabel: "Add mode",
+      body: `<ul class="mode-list">${modes.map(mode => `<li><span>${escapeHTML(mode.name)}</span>${mode.id ? `<button class="dlg-remove" type="button" data-del-mode="${escapeHTML(mode.id)}" aria-label="Remove ${escapeHTML(mode.name)}">×</button>` : ""}</li>`).join("")}</ul>
+        ${fieldHTML("New payment mode", "mode", '<input name="mode" autocomplete="off" required placeholder="e.g. GCash">')}`,
+      onReady: form => {
+        form.addEventListener("click", async event => {
+          const id = event.target.closest("[data-del-mode]")?.dataset.delMode;
+          if (!id) return;
+          try {
+            mustRpc(await client.rpc("delete_payment_mode", { p_id: id }));
+            await refreshData();
+            openPaymentModesModal();
+          } catch (error) {
+            const box = form.querySelector(".dlg-error");
+            box.textContent = friendlyError(error);
+            box.hidden = false;
+          }
+        });
+      },
+      onSubmit: async form => {
+        mustRpc(await client.rpc("add_payment_mode", { p_name: uppercaseEntry(form.elements.mode.value) }));
+        await refreshData();
+        setTimeout(openPaymentModesModal, 0);
+      },
+    });
+  }
+
+  let inventorySerialTip = null;
+  let inventorySerialHoverTimer;
+  let inventorySerialHoldTimer;
+  let inventorySerialTouch = null;
+
+  function hideInventorySerialTip() {
+    clearTimeout(inventorySerialHoverTimer);
+    clearTimeout(inventorySerialHoldTimer);
+    inventorySerialTip?.remove();
+    inventorySerialTip = null;
+  }
+
+  connectedContent.addEventListener("pointerover", event => {
+    if (event.pointerType !== "mouse" || modalRoot) return;
+    const trigger = event.target.closest(".inventory-serial-trigger");
+    if (!trigger || trigger.contains(event.relatedTarget)) return;
+    hideInventorySerialTip();
+    inventorySerialHoverTimer = setTimeout(() => {
+      if (!trigger.isConnected || modalRoot) return;
+      const body = inventorySerialDetails(trigger);
+      if (!body) return;
+      inventorySerialTip = document.createElement("aside");
+      inventorySerialTip.className = "inventory-serial-tip";
+      inventorySerialTip.setAttribute("role", "tooltip");
+      inventorySerialTip.innerHTML = body;
+      document.body.appendChild(inventorySerialTip);
+      const bounds = trigger.getBoundingClientRect();
+      const width = inventorySerialTip.offsetWidth, height = inventorySerialTip.offsetHeight;
+      inventorySerialTip.style.left = `${Math.max(8, Math.min(bounds.right - width, window.innerWidth - width - 8))}px`;
+      inventorySerialTip.style.top = `${Math.max(8, Math.min(bounds.bottom + 6, window.innerHeight - height - 8))}px`;
+      inventorySerialTip.addEventListener("pointerenter", () => clearTimeout(inventorySerialHoverTimer));
+      inventorySerialTip.addEventListener("pointerleave", hideInventorySerialTip);
+    }, 300);
+  });
+  connectedContent.addEventListener("pointerout", event => {
+    const trigger = event.target.closest(".inventory-serial-trigger");
+    if (!trigger || trigger.contains(event.relatedTarget)) return;
+    clearTimeout(inventorySerialHoverTimer);
+    inventorySerialHoverTimer = setTimeout(hideInventorySerialTip, 150);
+  });
+  connectedContent.addEventListener("pointerdown", event => {
+    if (event.pointerType === "mouse") return;
+    hideInventorySerialTip();
+    const trigger = event.target.closest(".inventory-serial-trigger");
+    if (!trigger) return;
+    inventorySerialTouch = { x: event.clientX, y: event.clientY };
+    inventorySerialHoldTimer = setTimeout(() => {
+      inventorySerialTouch = null;
+      if (trigger.isConnected) openInventorySerials(trigger);
+    }, 500);
+  });
+  connectedContent.addEventListener("pointermove", event => {
+    if (inventorySerialTouch && Math.hypot(event.clientX - inventorySerialTouch.x, event.clientY - inventorySerialTouch.y) > 10) {
+      clearTimeout(inventorySerialHoldTimer);
+      inventorySerialTouch = null;
+    }
+  });
+  ["pointerup", "pointercancel"].forEach(name => connectedContent.addEventListener(name, () => {
+    clearTimeout(inventorySerialHoldTimer);
+    inventorySerialTouch = null;
+  }));
+  connectedContent.addEventListener("contextmenu", event => {
+    if (event.target.closest(".inventory-serial-trigger")) event.preventDefault();
+  });
+  connectedContent.addEventListener("scroll", hideInventorySerialTip, { capture: true, passive: true });
+  connectedContent.addEventListener("input", hideInventorySerialTip);
+  window.addEventListener("scroll", hideInventorySerialTip, { passive: true });
+  window.addEventListener("resize", hideInventorySerialTip);
+  document.addEventListener("keydown", event => { if (event.key === "Escape") hideInventorySerialTip(); });
+
+  connectedContent.addEventListener("click", event => {
+    hideInventorySerialTip();
+    const serialItem = event.target.closest("[data-inventory-serials]");
+    if (serialItem && (!event.target.closest("button,a,input,select,textarea,label") || event.target.closest(".inventory-serial-trigger"))) {
+      openInventorySerials(serialItem);
+      return;
+    }
+    if (event.target.closest("[data-inventory-dismiss]")) {
+      event.target.closest(".inventory-reminder").remove();
+      return;
+    }
+    if (event.target.closest("[data-inventory-aging]")) {
+      ui.invView = "aging"; ui.invAge = "90"; activePage = "inventory"; renderConnected(); return;
+    }
+    const inventoryTab = event.target.closest("[data-inventory-tab]");
+    if (inventoryTab) {
+      if (workspaceWrites) { alert("Please wait for the current save to finish before switching tabs."); return; }
+      if (inventoryTab.dataset.inventoryTab === "import") { openImportCenter(); return; }
+      if (ui.invView === inventoryTab.dataset.inventoryTab) return;
+      ui.invTabScroll = inventoryTab.closest(".inventory-tabs").scrollLeft;
+      ui.invView = inventoryTab.dataset.inventoryTab;
+      ui.search = ""; ui.invBrand = ""; ui.pages = {};
+      renderInventoryPage();
+      renderTransferAlerts();
+      const selected = connectedContent.querySelector(`[data-inventory-tab="${ui.invView}"]`);
+      selected?.focus({ preventScroll: true });
+      if (selected) {
+        const strip = selected.closest(".inventory-tabs");
+        const buttonBounds = selected.getBoundingClientRect(), stripBounds = strip.getBoundingClientRect();
+        if (buttonBounds.left < stripBounds.left) strip.scrollLeft -= stripBounds.left - buttonBounds.left;
+        else if (buttonBounds.right > stripBounds.right) strip.scrollLeft += buttonBounds.right - stripBounds.right;
+        ui.invTabScroll = strip.scrollLeft;
+      }
+      return;
+    }
+    const availability = event.target.closest("[data-inventory-available]");
+    if (availability) {
+      ui.invAvailable = availability.dataset.inventoryAvailable === "available";
+      ui.pages = {};
+      refreshResults();
+      return;
+    }
+    const adjust = event.target.closest("[data-inventory-adjust]");
+    if (adjust) { openInventoryAdjust(adjust.dataset.inventoryAdjust, adjust.dataset.branch); return; }
+    const classify = event.target.closest("[data-inventory-classify]");
+    if (classify && currentProfile.role === "admin") { openInventoryClassification(classify.dataset.inventoryClassify, classify.dataset.branch); return; }
+    const transferAction = event.target.closest("[data-transfer-action]");
+    if (transferAction) { openInventoryTransferAction(transferAction.dataset.id, transferAction.dataset.transferAction); return; }
+    const batchAction = event.target.closest("[data-batch-action]");
+    if (batchAction) { openInventoryBatchAction(batchAction.dataset.id, batchAction.dataset.batchAction); return; }
+    if (event.target.closest("[data-transfer-inbox]")) {
+      ui.invView = "transfers"; ui.search = ""; ui.pages = {}; activePage = "inventory"; renderConnected(); return;
+    }
+    const chartButton = event.target.closest("[data-chart-download]");
+    if (chartButton) {
+      chooseExportFormat(chartButton, format => {
+        if (format === "png") return downloadChart(chartButton);
+        const title = chartButton.dataset.chartDownload;
+        const rows = JSON.parse(chartButton.dataset.chartRows);
+        return exportWorkbook([{ name: title, rows }], `branchline-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${localISODate()}`, false, format);
+      }, true);
+      return;
+    }
+    const awardBatch = event.target.closest("[data-award-top10]");
+    const awardSingle = event.target.closest("[data-ps-certificate]");
+    if (awardBatch || awardSingle) {
+      if (!["manager", "district_manager", "admin"].includes(currentProfile?.role) || demoStore) return;
+      void downloadTopPsCertificates(awardSingle?.dataset.psCertificate || null)
+        .catch(error => { console.error("Certificate export failed.", error); alert(error.message || "Certificate export failed."); });
+      return;
+    }
+    const snoozeNotice = event.target.closest("[data-manager-attention-snooze]");
+    if (snoozeNotice) {
+      if (!["manager", "district_manager", "admin"].includes(currentProfile?.role)) return;
+      if (!snoozeManagerAttentionNotice(snoozeNotice.dataset.managerAttentionSnooze)) {
+        alert("Your browser could not save this notice preference.");
+      } else refreshResults();
+      return;
+    }
+    if (event.target.closest("[data-manager-attention-analytics]")) {
+      if (!["manager", "district_manager", "admin"].includes(currentProfile?.role)) return;
+      activePage = "analytics";
+      renderConnected();
+      return;
+    }
+    const managementReport = event.target.closest("[data-management-report]");
+    if (managementReport) {
+      if (!["manager", "district_manager", "admin"].includes(currentProfile?.role)) return;
+      chooseExportFormat(managementReport, format => exportManagementReport(managementReport.dataset.managementReport, format));
+      return;
+    }
+    const exportAll = event.target.closest("[data-export-all]");
+    if (exportAll) {
+      chooseExportFormat(exportAll, exportAllTables);
+      return;
+    }
+    const dailySalesDay = event.target.closest("[data-daily-sales-date]");
+    if (dailySalesDay) {
+      try { openDailySalesLog(dailySalesDay.dataset.dailySalesDate); }
+      catch (error) { console.error("Daily sales log could not open.",error); alert(friendlyError(error)); }
+      return;
+    }
+    const pie = event.target.closest("[data-pie-table]");
+    if (pie) {
+      openPieTable(pie.dataset.pieTable, pie);
+      return;
+    }
+    const calendarDate = event.target.closest("[data-event-date]");
+    if (calendarDate) { openCalendarDate(calendarDate.dataset.eventDate, JSON.parse(calendarDate.dataset.eventBranches)); return; }
+    const revokeClimate = event.target.closest("[data-climate-revoke]");
+    if (revokeClimate) { openClimateRevoke(revokeClimate.dataset.climateRevoke); return; }
+    const open = event.target.closest("[data-open]")?.dataset.open;
+    if (open === "calendar-event") { openCalendarEvent(); return; }
+    if (open === "event-review") { openEventReview(); return; }
+    if (open === "climate-location") { openClimateLocation(); return; }
+    if (open === "climate-review") { openClimateReview(); return; }
+    if (open === "climate-check") { openClimateCheck(); return; }
+    if (open === "import-center" || open === "inventory-import") openImportCenter();
+    else if (open === "inventory-transfer") openInventoryTransfer();
+    else if (open === "product") openProductModal();
+    else if (open === "payments") openPaymentModesModal();
+    else if (open === "import") openImportModal();
+    else if (open === "payment-targets") {
+      try { openPaymentTargetsModal(); }
+      catch (error) { console.error("Unable to open payment mix targets.", error); alert(friendlyError(error)); }
+    }
+    else if (open === "sync-categories") openSyncCategoriesModal();
+    else if (open === "sales-history") openSalesHistoryModal();
+    else if (open === "daily-history") openDailyHistoryModal();
+    else if (open === "target" || open === "targets-bulk") {
+      try {
+        if (!["manager", "district_manager", "admin"].includes(currentProfile?.role)) {
+          throw new Error("Your account is not authorized to manage targets.");
+        }
+        if (open === "target") openTargetModal();
+        else openBulkTargetsModal();
+      } catch (error) {
+        console.error("Unable to open target editor.", error);
+        alert(friendlyError(error));
+      }
+    }
+    else if (open === "district") openDistrictModal();
+    else if (open === "branch") openBranchModal();
+    else if (open === "user") openUserModal();
+    else if (open === "users-bulk") openBulkUsersModal();
+    else if (open === "wipe") openWipeModal();
+    else if (open === "holiday") openHolidayModal();
+    else if (open === "walkin-ps") openWalkInModal("ps");
+    else if (open === "walkin-store") openWalkInModal("store");
+    else if (open === "walkin-daily") openWalkInDailyModal();
+    else if (open === "transactions-daily") openWalkInDailyModal();
+    else if (open === "inventory-moh") openInventoryMoh();
+    else if (open === "push-message") openPushMessageModal(event.target.closest("[data-open]").dataset.status);
+    else if (open === "push-schedule") {
+      const id = event.target.closest("[data-open]").dataset.id;
+      openPushScheduleModal((liveData.pushSchedules || []).find(item => item.id === id));
+    }
+    const pushDelete = event.target.closest("[data-push-delete]");
+    if (pushDelete) {
+      pushDelete.disabled = true;
+      client.rpc("delete_push_message", { p_id: pushDelete.dataset.pushDelete })
+        .then(result => { mustRpc(result); return refreshData(); })
+        .catch(error => { pushDelete.disabled = false; alert(error.message || "Could not delete the message."); });
+    }
+    const pushScheduleDelete = event.target.closest("[data-push-schedule-delete]");
+    if (pushScheduleDelete) {
+      pushScheduleDelete.disabled = true;
+      client.rpc("delete_push_alert_schedule", { p_id: pushScheduleDelete.dataset.pushScheduleDelete })
+        .then(result => { mustRpc(result); return refreshData(); })
+        .catch(error => { pushScheduleDelete.disabled = false; alert(error.message || "Could not delete the schedule."); });
+    }
+    const holidayDelete = event.target.closest("[data-holiday-delete]");
+    if (holidayDelete) {
+      holidayDelete.disabled = true;
+      client.rpc("delete_company_holiday", { p_date: holidayDelete.dataset.holidayDelete })
+        .then(result => { mustRpc(result); return refreshData(); })
+        .catch(error => { holidayDelete.disabled = false; alert(error.message || "Could not delete the date."); });
+    }
+    const geo = event.target.closest("[data-geo]");
+    if (geo) {
+      const [action, kind] = geo.dataset.geo.split("-");
+      if (action === "edit") openGeoEditModal(kind, geo.dataset.id);
+      else openGeoDeleteModal(kind, geo.dataset.id);
+    }
+    const edit = event.target.closest("[data-edit-target]");
+    if (edit) {
+      const target = liveData.targets.find(item => item.id === edit.dataset.editTarget);
+      if (target) openTargetModal(target);
+    }
+    if (event.target.closest("[data-log-clear]")) {
+      ui.logBranch = "";
+      ui.logFrom = "";
+      ui.logTo = "";
+      saveAccountFilters();
+      ui.pages = {};
+      refreshResults();
+    }
+    const salesExport = event.target.closest("[data-export]");
+    if (salesExport) chooseExportFormat(salesExport, exportSales);
+    const tableExport = event.target.closest("[data-export-table]");
+    if (tableExport) chooseExportFormat(tableExport, format => exportTable(tableExport.dataset.exportTable, format));
+    if (open === "sale") {
+      if (currentProfile.role === "admin") openAdminTestSale();
+      else if (currentProfile.role === "ps") openSaleModal();
+    }
+    if (open === "promotion-sale") {
+      try { openPromotionSaleLookup(); } catch (error) { alert(friendlyError(error)); }
+    }
+    if (open === "promotion-review") openPromotionReviewModal().catch(error => {
+      console.error("Unable to open promotion review.", error); alert(friendlyError(error));
+    });
+    if (open === "sales-return") {
+      if (!["ps","manager","district_manager","admin"].includes(currentProfile.role)) {
+        alert("This account cannot post sales returns.");
+        return;
+      }
+      const returnClient = client, returnProfile = currentProfile.id;
+      import("./sales-returns.mjs").then(({ openSalesReturn }) => openSalesReturn({
+        openModal, escapeHTML, today: localISODate(), formatMoney, refresh: refreshData,
+        rpc: async (name, args) => {
+          if (client !== returnClient || currentProfile?.id !== returnProfile) throw new Error("The account changed. Reopen Sales return.");
+          if (demoStore) throw new Error("Sales returns require a live workspace; no demo stock or sales were changed.");
+          const { data, error } = await returnClient.rpc(name, args);
+          if (error) throw error;
+          if (client !== returnClient || currentProfile?.id !== returnProfile) throw new Error("The account changed. Reload the current workspace before continuing.");
+          return data;
+        },
+      })).catch(error => { console.error("Sales return could not open.",error); alert(friendlyError(error)); });
+    }
+    const saleDetails = event.target.closest("[data-sale-details]");
+    if (saleDetails) {
+      try { openSaleDetails(saleDetails.dataset.saleDetails); }
+      catch (error) { alert(error.message); }
+    }
+    const brandSale = event.target.closest("[data-brand-sale]");
+    if (brandSale) openBrandSale(brandSale.dataset.brandSale);
+    const salesDay = event.target.closest("[data-daily-sales-table-date]");
+    if (salesDay) openDailySalesLog(salesDay.dataset.dailySalesTableDate, true);
+    const editProduct = event.target.closest("[data-edit-product]");
+    if (editProduct) {
+      const product = liveData.products.find(item => item.barcode === editProduct.dataset.editProduct);
+      if (product) openProductModal(product);
+    }
+    const editSale = event.target.closest("[data-edit-sale]");
+    const deliveryPerson = event.target.closest("[data-delivery-person]");
+    if (deliveryPerson) openDeliveryDetails(deliveryPerson.dataset.deliveryPerson);
+    if (editSale && (currentProfile.role === "ps" || canCorrectBundleSale(currentProfile.role))) {
+      const sale = [...liveData.sales, ...liveData.testSales].find(item => item.id === editSale.dataset.editSale);
+      if (sale) openEditSaleModal(sale, editSale);
+    }
+    const deleteSale = event.target.closest("[data-delete-sale]");
+    if (deleteSale && currentProfile.role === "admin") {
+      const sale = [...liveData.sales, ...liveData.testSales].find(item => item.id === deleteSale.dataset.deleteSale);
+      if (sale) openDeleteSaleModal(sale);
+    }
+    const peopleAction = event.target.closest("[data-person]");
+    if (event.target.closest("[data-disabled-accounts]") && currentProfile.role === "admin") {
+      ui.peopleDisabled = !ui.peopleDisabled;
+      ui.pages = {};
+      renderPeoplePage();
+    }
+    if (peopleAction) {
+      const person = liveData.profiles.find(item => item.id === peopleAction.dataset.id);
+      if (person) openPersonAction(peopleAction.dataset.person, person);
+    }
+  });
+
+  // Exports every row of a table (all pages), not just the visible page.
+  function tableToSheet(table, name) {
+    if (tableStore.brandlog === table) return brandLogExportSheet(table.items, name);
+    if (tableStore["an-inventory-products"] === table || tableStore["an-inventory-brand-moh"] === table) return { name, rows: [table.headers, ...table.items] };
+    const keep = table.headers.map(isDataHeader);
+    const doc = new DOMParser().parseFromString(`<table><tbody>${table.items.map(table.rowHtml).join("")}</tbody></table>`, "text/html");
+    const rows = [...doc.querySelectorAll("tr")].map(tr =>
+      [...tr.children].filter((_, index) => keep[index]).map(cell => cell.textContent.trim()));
+    return { name, rows: [table.headers.filter(isDataHeader), ...rows] };
+  }
+
+  function exportTable(key, format = "excel") {
+    if (key === "customers" && (activePage !== "customers" || !rolePages[currentProfile?.role]?.includes("customers"))) return;
+    const table = tableStore[key];
+    if (!table) throw new Error("This table is no longer available. Reopen it and try again.");
+    const title = table.title || key;
+    return exportWorkbook([tableToSheet(table, title)],
+      `branchline-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-${localISODate()}`, false, format);
+  }
+
+  // ---------- Push notifications (behind-pace alerts for PSs) ----------
+  const pushSupported = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  const pushButton = () => document.querySelector("#push-toggle");
+
+  function vapidKeyBytes(key) {
+    const padded = (key + "=".repeat((4 - (key.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+    return Uint8Array.from(atob(padded), char => char.charCodeAt(0));
+  }
+
+  async function currentPushSubscription() {
+    const registration = await navigator.serviceWorker.ready;
+    return registration.pushManager.getSubscription();
+  }
+
+  function refreshPushButton() {
+    const button = pushButton();
+    if (!button) return;
+    const permission = document.querySelector("#push-permission");
+    const status = document.querySelector("#push-status");
+    const eligible = !demoStore && ["ps","manager","inventory_controller","stock_custodian"].includes(currentProfile?.role);
+    const off = Boolean(localStorage.getItem(pushOptOutKey()));
+    button.hidden = !eligible;
+    permission.hidden = !eligible || off || !pushSupported || !config.vapidPublicKey || Notification.permission !== "default";
+    status.hidden = !eligible;
+    button.disabled = false;
+    button.textContent = off ? "Turn on pace alerts" : "Turn off pace alerts";
+    status.textContent = off ? "Pace alerts are off on this device." :
+      !pushSupported || !config.vapidPublicKey ? "Pace alerts are on. This device does not support background delivery here." :
+      Notification.permission === "denied" ? "Pace alerts are on. Device notifications are blocked in browser settings." :
+      Notification.permission === "default" ? "Pace alerts are on. Allow device notifications to receive them in the background." :
+      "Pace alerts are on and device notifications are allowed.";
+  }
+
+  const pushOptOutKey = () => `branchline-push-off-${currentProfile?.id || ""}`;
+
+  async function saveCurrentPushSubscription(registration) {
+    if (demoStore) throw new Error("Push subscriptions are disabled in demo mode.");
+    const pushClient = liveClient;
+    const profileId = currentProfile?.id;
+    const assertLiveAccount = () => {
+      if (demoStore || currentProfile?.id !== profileId) throw new Error("The account changed before push registration finished. Try again after signing in.");
+    };
+    let subscription = await registration.pushManager.getSubscription();
+    assertLiveAccount();
+    if (!subscription) {
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: vapidKeyBytes(config.vapidPublicKey),
+      });
+    }
+    assertLiveAccount();
+    const json = subscription.toJSON();
+    mustRpc(await pushClient.rpc("save_push_subscription", { p_endpoint: json.endpoint, p_p256dh: json.keys.p256dh, p_auth: json.keys.auth }));
+  }
+
+  // Once the phone/browser has granted permission, every app open silently (re)registers this device for the signed-in PS.
+  async function autoRegisterPush() {
+    if (demoStore || !pushSupported || !config.vapidPublicKey || !["ps","manager","inventory_controller","stock_custodian"].includes(currentProfile?.role)) return;
+    if (Notification.permission !== "granted" || localStorage.getItem(pushOptOutKey())) return;
+    try {
+      await saveCurrentPushSubscription(await navigator.serviceWorker.ready);
+    } catch (error) {
+      console.warn("Could not register this device for alerts.", error);
+    }
+    refreshPushButton(true);
+  }
+
+  async function enablePush() {
+    if (demoStore) throw new Error("Real push notifications are disabled in demo mode.");
+    const profileId = currentProfile?.id;
+    if ((await Notification.requestPermission()) !== "granted") throw new Error("Allow notifications in your browser or device settings to receive background alerts.");
+    if (demoStore || currentProfile?.id !== profileId) throw new Error("The account changed. Enable notifications again after signing in.");
+    localStorage.removeItem(pushOptOutKey());
+    await saveCurrentPushSubscription(await navigator.serviceWorker.ready);
+  }
+
+  async function togglePush() {
+    if (demoStore) return alert("Real push notifications are disabled in demo mode.");
+    const button = pushButton();
+    button.disabled = true;
+    try {
+      if (localStorage.getItem(pushOptOutKey())) {
+        localStorage.removeItem(pushOptOutKey());
+        await autoRegisterPush();
+      } else {
+        if (pushSupported) {
+          const existing = await currentPushSubscription();
+          if (existing) {
+            mustRpc(await client.rpc("delete_push_subscription", { p_endpoint: existing.endpoint }));
+            await existing.unsubscribe();
+          }
+        }
+        localStorage.setItem(pushOptOutKey(), "1");
+      }
+    } catch (error) {
+      alert(error.message || "Could not change notification settings.");
+    }
+    await refreshPushButton(currentProfile?.role === "ps");
+  }
+
+  // ---------- Pace pop-up shown after sign-in ----------
+  const PACE_DEFAULTS = {
+    behind: "{name}, you are behind pace: {sold} sold vs {expected} expected by today. You can still catch up!",
+    on: "{name}, you are on track: {sold} sold vs {expected} expected by today. Keep it up!",
+    exceeded: "{name}, target reached! {sold} sold against your {share} share. Outstanding work!",
+  };
+  const PACE_TITLES = { behind: "You're behind pace", on: "You're on track", exceeded: "Target reached!" };
+
+  function paceMessage(status, vars) {
+    const pool = (liveData.pushMessages || []).filter(item => item.status === status);
+    const raw = pool.length ? pool[Math.floor(Math.random() * pool.length)].message : PACE_DEFAULTS[status];
+    return String(raw).split("{name}").join(vars.name).split("{sold}").join(vars.sold).split("{expected}").join(vars.expected).split("{share}").join(vars.share);
+  }
+
+  function flashScreenEdges(color) {
+    document.querySelector(".edge-glow")?.remove();
+    const glow = document.createElement("div");
+    glow.className = "edge-glow";
+    glow.style.setProperty("--glow", color);
+    glow.setAttribute("aria-hidden", "true");
+    document.body.appendChild(glow);
+    window.setTimeout(() => glow.remove(), 5000);
+  }
+
+  function showPacePopup() {
+    if (currentProfile?.role !== "ps" || pacePopupShown || localStorage.getItem(pushOptOutKey())) return;
+    const { actual, target } = personalTargetProgress("price");
+    if (!(target > 0)) return;
+    pacePopupShown = true;
+    const status = paceStatus(actual, target);
+    const expected = target * paceFraction();
+    const text = paceMessage(status.key, {
+      name: String(currentProfile.full_name || "").split(" ")[0] || "there",
+      sold: formatMoney(actual),
+      expected: formatMoney(expected),
+      share: formatMoney(target),
+    });
+    const canAsk = pushSupported && config.vapidPublicKey && Notification.permission === "default";
+    closeModal();
+    modalRoot = document.createElement("div");
+    modalRoot.className = "dlg-backdrop";
+    const root = modalRoot;
+    root.innerHTML = `<div class="dlg pace-popup pace-${status.key}" style="--glow:${status.color}" role="dialog" aria-modal="true" aria-label="Pace update">
+      <div class="dlg-head"><h2>${escapeHTML(PACE_TITLES[status.key])}</h2><button class="dlg-close" type="button" aria-label="Close" data-modal-close>×</button></div>
+      <div class="dlg-form">
+        <p class="pace-text">${escapeHTML(text)}</p>
+        <div class="pace-numbers"><div><span>Sold (MTD)</span><strong>${escapeHTML(formatMoney(actual))}</strong></div><div><span>Expected by now</span><strong>${escapeHTML(formatMoney(expected))}</strong></div><div><span>Your target share</span><strong>${escapeHTML(formatMoney(target))}</strong></div></div>
+        <p class="dlg-error" role="alert" hidden></p>
+        <div class="dlg-actions">${canAsk ? '<button class="button button-outline" type="button" data-pace-enable>Turn on alerts</button>' : ""}<button class="button button-primary" type="button" data-modal-close>Got it</button></div>
+      </div></div>`;
+    document.body.appendChild(root);
+    root.addEventListener("pointerdown", event => {
+      if (event.target === root || event.target.closest("[data-modal-close]")) closeModal();
+    });
+    root.querySelector("[data-pace-enable]")?.addEventListener("click", async event => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        await enablePush();
+        button.textContent = "Alerts on ✓";
+        refreshPushButton(true);
+      } catch (error) {
+        const box = root.querySelector(".dlg-error");
+        box.textContent = error.message || "Could not turn on alerts.";
+        box.hidden = false;
+        button.disabled = false;
+      }
+    });
+    flashScreenEdges(status.color);
+  }
+
+  document.querySelector("#push-toggle")?.addEventListener("click", togglePush);
+  document.querySelector("#push-permission")?.addEventListener("click", async () => {
+    try { await enablePush(); }
+    catch (error) { alert(error.message || "Could not allow device notifications."); }
+    refreshPushButton();
+  });
+  document.querySelector("#change-password").addEventListener("click", () => openPasswordModal());
+  document.querySelector("#forgot-password").addEventListener("click", openForgotPasswordModal);
+  document.querySelector("#show-password").addEventListener("change", event => {
+    loginForm.elements.password.type = event.target.checked ? "text" : "password";
+  });
+
+  connectedNav.addEventListener("click", event => {
+    const button = event.target.closest("[data-live-page]");
+    if (!button || !rolePages[currentProfile?.role]?.includes(button.dataset.livePage)) return;
+    activePage = button.dataset.livePage;
+    ui.search = "";
+    ui.pages = {};
+    connectedSidebar.classList.remove("open");
+    window.scrollTo(0, 0);
+    renderConnected();
+  });
+
+  const pieTip = document.createElement("div");
+  pieTip.className = "pie-tip";
+  pieTip.hidden = true;
+  document.body.appendChild(pieTip);
+  let pieHoldTimer = 0;
+  let chartTouchStart = null;
+
+  function showPieTip(slice, x, y) {
+    const [label, money, pct, ...details] = slice.dataset.tip.split("|");
+    pieTip.innerHTML = `<strong>${escapeHTML(label)}</strong><span>${money ? `${escapeHTML(money)} · ` : ""}${escapeHTML(pct)}</span>${details.map(detail => `<span>${escapeHTML(detail)}</span>`).join("")}`;
+    pieTip.hidden = false;
+    const width = pieTip.offsetWidth;
+    pieTip.style.left = `${Math.max(8, Math.min(x - width / 2, window.innerWidth - width - 8))}px`;
+    pieTip.style.top = `${Math.max(8, y - pieTip.offsetHeight - 14)}px`;
+  }
+
+  function hidePieTip() {
+    clearTimeout(pieHoldTimer);
+    pieTip.hidden = true;
+  }
+
+  connectedContent.addEventListener("pointermove", event => {
+    if (chartTouchStart && Math.hypot(event.clientX - chartTouchStart.x, event.clientY - chartTouchStart.y) > 10) {
+      chartTouchStart = null;
+      hidePieTip();
+    }
+    if (event.pointerType !== "mouse") return;
+    const slice = event.target.closest(".pie-slice, .daily-bar-hit");
+    if (slice) showPieTip(slice, event.clientX, event.clientY);
+    else hidePieTip();
+  });
+  connectedContent.addEventListener("pointerleave", hidePieTip);
+  connectedContent.addEventListener("pointerdown", event => {
+    if (event.pointerType === "mouse") return;
+    const slice = event.target.closest(".pie-slice, .daily-bar-hit");
+    if (!slice) return hidePieTip();
+    const { clientX, clientY } = event;
+    chartTouchStart = { x: clientX, y: clientY };
+    clearTimeout(pieHoldTimer);
+    pieHoldTimer = setTimeout(() => showPieTip(slice, clientX, clientY), 400);
+  });
+  ["pointerup", "pointercancel"].forEach(name =>
+    connectedContent.addEventListener(name, event => {
+      if (event.pointerType === "mouse") return;
+      chartTouchStart = null;
+      clearTimeout(pieHoldTimer);
+      if (name === "pointercancel") hidePieTip();
+      else setTimeout(hidePieTip, 1500);
+    }));
+  connectedContent.addEventListener("contextmenu", event => {
+    if (event.target.closest(".pie-slice, .daily-bar-hit")) event.preventDefault();
+  });
+  connectedContent.addEventListener("focusin", event => {
+    const day = event.target.closest(".daily-bar-hit");
+    if (!day) return;
+    showFocusedDailyTip();
+  });
+  function showFocusedDailyTip() {
+    window.requestAnimationFrame(() => {
+      const day = document.activeElement;
+      if (!day?.matches(".daily-bar-hit:focus-visible")) return;
+      const rect = day.getBoundingClientRect();
+      if (rect.right <= 0 || rect.left >= window.innerWidth || rect.bottom <= 0 || rect.top >= window.innerHeight) return;
+      showPieTip(day, rect.left + rect.width / 2, rect.top + rect.height / 2);
+    });
+  }
+  connectedContent.addEventListener("focusout", event => {
+    if (event.target.closest(".daily-bar-hit")) hidePieTip();
+  });
+  function hideChartTipOnScroll() {
+    chartTouchStart = null;
+    hidePieTip();
+    showFocusedDailyTip();
+  }
+  connectedContent.addEventListener("scroll", hideChartTipOnScroll, { capture: true, passive: true });
+  window.addEventListener("scroll", hideChartTipOnScroll, { passive: true });
+
+  connectedContent.addEventListener("input", event => {
+    const inventorySearch = event.target.closest("[data-inventory-product-search]");
+    if (inventorySearch) {
+      const start = inventorySearch.selectionStart, end = inventorySearch.selectionEnd;
+      ui.inventoryProductSearch = inventorySearch.value;
+      ui.pages["an-inventory-products"] = 1;
+      refreshResults();
+      const field = connectedContent.querySelector("[data-inventory-product-search]");
+      if (field) {
+        field.focus();
+        field.setSelectionRange(start, end);
+      }
+      return;
+    }
+  });
+
+  connectedContent.addEventListener("input", event => {
+    const control = event.target.closest("[data-filter]");
+    if (!control || !resultsView) return;
+    const fieldScope = control.closest("[data-pie-table-content]") ? modalRoot : connectedContent;
+    const key = control.dataset.filter;
+    if (key === "inventoryForecastMonth" && !/^\d{4}-(0[1-9]|1[0-2])$/.test(control.value)) {
+      alert("Choose a valid forecast month.");
+      control.value = ui.inventoryForecastMonth || localISODate().slice(0, 7);
+      return;
+    }
+    if (key === "inventoryForecastFrom" || key === "inventoryForecastTo") {
+      const from = key === "inventoryForecastFrom" ? control.value : ui.inventoryForecastFrom;
+      const to = key === "inventoryForecastTo" ? control.value : ui.inventoryForecastTo;
+      if (from && to && from > to) {
+        alert("Forecast from must be on or before Forecast to.");
+        control.value = ui[key] || "";
+        return;
+      }
+    }
+    if (key === "logFrom" || key === "logTo") {
+      const from = key === "logFrom" ? control.value : ui.logFrom;
+      const to = key === "logTo" ? control.value : ui.logTo;
+      if (from && to && from > to) {
+        alert("From date must be on or before To date.");
+        control.value = ui[key];
+        return;
+      }
+    }
+    ui[key] = control.value;
+    if (key === "month" && ui.date && ui.date.slice(0, 7) !== ui.month) ui.date = `${ui.month}-01`;
+    if (key === "date" && ui.date) ui.month = ui.date.slice(0, 7);
+    ui.pages = {};
+    if (key === "rankCategory") ui.rankSub = "";
+    if (key === "district") {
+      ui.branch = "";
+      saveAccountFilters();
+      renderConnected();
+    } else if (key === "period" || key === "anRange") {
+      saveAccountFilters();
+      renderConnected();
+    } else {
+      const caret = control.selectionStart;
+      refreshResults();
+      saveAccountFilters();
+      if (key === "search") {
+        const field = fieldScope.querySelector('[data-filter="search"]');
+        if (field) {
+          field.focus();
+          field.setSelectionRange(caret, caret);
+        }
+      }
+    }
+  });
+
+  connectedContent.addEventListener("change", event => {
+    const inventoryDetails = event.target.closest("[data-inventory-product-details]");
+    if (inventoryDetails) {
+      ui.inventoryProductDetails = inventoryDetails.checked;
+      refreshResults();
+      connectedContent.querySelector("[data-inventory-product-details]")?.focus();
+      return;
+    }
+    const calendarMonth = event.target.closest("[data-event-month]");
+    if(calendarMonth) {
+      if(!/^\d{4}-(0[1-9]|1[0-2])$/.test(calendarMonth.value)) {
+        calendarMonth.value=ui.eventCalendarMonth || ui.inventoryForecastMonth || localISODate().slice(0,7);
+        alert("Choose a valid calendar month."); return;
+      }
+      ui.eventCalendarMonth=calendarMonth.value; refreshResults(); return;
+    }
+    const select = event.target.closest("[data-person-action]");
+    if (!select || currentProfile.role !== "admin") return;
+    const action = select.value;
+    select.value = "";
+    const person = liveData.profiles.find(row => row.id === select.dataset.personAction);
+    if (person && ["edit", "transfer", "toggle", "delete"].includes(action) && (person.role !== "admin" || action === "edit")) {
+      openPersonAction(action, person);
+    }
+  });
+
+  connectedContent.addEventListener("click", event => {
+    const customerEdit = event.target.closest("[data-customer-edit]");
+    if (customerEdit) {
+      openCustomerEditor(customerEdit.dataset.customerEdit);
+      return;
+    }
+    const customer = event.target.closest("[data-customer-history]");
+    if (customer) {
+      openCustomerHistory(customer.dataset.customerHistory);
+      return;
+    }
+    const detailRow = event.target.closest("[data-ps-detail]");
+    if (detailRow) openPsDetailModal(detailRow.dataset.psDetail);
+    const brandRow = event.target.closest("[data-brand-detail]");
+    if (brandRow) openBrandDetailModal(brandRow);
+    const pagerButton = event.target.closest("[data-pager]");
+    const sortButton = event.target.closest("[data-sort-table]");
+    if (sortButton) {
+      openTableColumn(sortButton, refreshResults, sortButton.closest(".dlg-backdrop") ?? connectedContent);
+      return;
+    }
+    if (event.target.closest("[data-delete-products]") && currentProfile.role === "admin" && productSelection.size) {
+      openDeleteProductsModal();
+      return;
+    }
+    if (pagerButton && !pagerButton.disabled) {
+      ui.pages[pagerButton.dataset.pager] = Number(pagerButton.dataset.page);
+      refreshResults();
+    }
+  });
+
+  connectedContent.addEventListener("change", event => {
+    if (currentProfile?.role !== "admin") return;
+    const row = event.target.closest?.("[data-product-select]");
+    if (row) {
+      if (row.checked) productSelection.add(row.dataset.productSelect);
+      else productSelection.delete(row.dataset.productSelect);
+      refreshResults();
+    } else if (event.target.matches?.("[data-product-select-all]")) {
+      productSelection.clear();
+      if (event.target.checked) productsFiltered.forEach(key => productSelection.add(key));
+      refreshResults();
+    }
+  });
+
+  connectedContent.addEventListener("keydown", event => {
+    const dailySalesDay = event.target.closest("[data-daily-sales-date]");
+    if (dailySalesDay && ["Enter"," "].includes(event.key) && window.matchMedia("(min-width: 901px)").matches) {
+      event.preventDefault();
+      dailySalesDay.dispatchEvent(new MouseEvent("click",{ bubbles: true }));
+      return;
+    }
+    const saleRow = event.target.closest("[data-sale-details], [data-delivery-person], [data-brand-sale], [data-daily-sales-table-date], [data-customer-history]");
+    if (saleRow && !event.target.closest("[data-customer-edit]") && ["Enter", " "].includes(event.key)) {
+      event.preventDefault();
+      saleRow.click();
+      return;
+    }
+    const pie = event.target.closest("[data-pie-table]");
+    if (pie && !["BUTTON", "SELECT", "INPUT"].includes(event.target.tagName) && ["Enter", " "].includes(event.key)) {
+      event.preventDefault();
+      openPieTable(pie.dataset.pieTable, pie);
+      return;
+    }
+    const detailRow = event.target.closest?.("[data-ps-detail]");
+    const brandRow = event.target.closest?.("[data-brand-detail]");
+    if (brandRow && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      openBrandDetailModal(brandRow);
+    }
+    if (detailRow && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      openPsDetailModal(detailRow.dataset.psDetail);
+    }
+  });
+
+  loginForm.addEventListener("submit", async event => {
+    event.preventDefault();
+    const submit = loginForm.querySelector('[type="submit"]');
+    submit.disabled = true;
+    setAuthMessage("Signing in…");
+    const remember = document.querySelector("#remember-me")?.checked !== false;
+    signingInRemembered = remember;
+    try {
+      const { data, error } = await client.auth.signInWithPassword({
+        email: loginEmail(loginForm.elements.email.value) || loginForm.elements.email.value.trim(),
+        password: loginForm.elements.password.value,
+      });
+      if (error) throw error;
+      localStorage.setItem(REMEMBER_KEY, remember ? "1" : "0");
+      if (remember) localStorage.setItem(LAST_LOGIN_KEY, loginForm.elements.email.value.trim());
+      else localStorage.removeItem(LAST_LOGIN_KEY);
+      await loadLiveWorkspace(data.session);
+    } catch (error) {
+      console.error("Branchline sign-in failed.", error);
+      setAuthMessage(error.code === "user_banned"
+        ? "This account cannot sign in yet. If you have a pending invitation, accept it first. Otherwise, contact your administrator."
+        : error.message || "Unable to sign in. Check your email and password.", true);
+    } finally {
+      signingInRemembered = null;
+      submit.disabled = false;
+    }
+  });
+
+  document.querySelector("#sign-out").addEventListener("click", async () => {
+    if (demoStore) return exitDemo();
+    const { error } = await client.auth.signOut({ scope: "local" });
+    if (error) {
+      console.error("Branchline sign-out failed.", error);
+      connectedContent.insertAdjacentHTML("afterbegin", `<p class="connected-error">${escapeHTML(error.message)}</p>`);
+      return;
+    }
+    clearWorkspace();
+  });
+
+  document.querySelector("#enter-demo").addEventListener("click", startDemo);
+  document.querySelector("#reset-saved-demo").addEventListener("click", async () => {
+    if (!confirm("Discard saved demo edits? Your real data is not affected.")) return;
+    try {
+      localStorage.removeItem(window.BranchlineDemo.STATE_KEY);
+      localStorage.removeItem(window.BranchlineDemo.CATALOG_KEY);
+      document.querySelector("#reset-saved-demo").hidden = true;
+      await startDemo();
+    } catch (error) { setAuthMessage(error.message, true); }
+  });
+
+  document.querySelector("#connected-menu").addEventListener("click", () => {
+    connectedSidebar.classList.toggle("open");
+  });
+
+  document.querySelector(".connected-main").addEventListener("click", event => {
+    if (connectedSidebar.classList.contains("open") && !event.target.closest("#connected-menu")) {
+      connectedSidebar.classList.remove("open");
+    }
+  });
+
+  if (window.supabase?.createClient && config?.url && config?.publishableKey) {
+    client = liveClient = window.supabase.createClient(config.url, config.publishableKey, { auth: { storage: authStorage } });
+    applyRememberedLogin();
+    configWarning.hidden = true;
+    const signInButton = loginForm.querySelector("button[type=submit]");
+    signInButton.disabled = true;
+    setAuthMessage("Checking for a saved sign-in…");
+    client.auth.onAuthStateChange((event, session) => {
+      if (demoStore || event === "INITIAL_SESSION") return;
+      if (event === "PASSWORD_RECOVERY" && session) {
+        passwordRecoveryPending = true;
+        const sequence = loadSequence;
+        window.setTimeout(() => {
+          if (demoStore || sequence !== loadSequence) return;
+          if (liveData && currentSession?.user?.id === session.user.id) openPasswordModal(true);
+          else loadLiveWorkspace(session);
+        }, 0);
+      } else if (event === "SIGNED_OUT") {
+        clearWorkspace();
+      } else if (signingInRemembered === null && session && session.user.id !== currentSession?.user?.id) {
+        const sequence = loadSequence;
+        window.setTimeout(() => { if (!demoStore && sequence === loadSequence) loadLiveWorkspace(session); }, 0);
+      }
+    });
+    const restoreSequence = loadSequence;
+    client.auth.getSession().then(async ({ data, error }) => {
+      if (demoStore || restoreSequence !== loadSequence) return;
+      if (error) {
+        console.error("Unable to restore the Branchline session.", error);
+        setAuthMessage("Unable to restore your sign-in. Try signing in again.", true);
+        return;
+      }
+      if (data.session) await loadLiveWorkspace(data.session);
+      else if (recoveryLinkFailed) setAuthMessage("This reset link is invalid or expired. Use Forgot password? to request a new link.", true);
+      else setAuthMessage("");
+    }).catch(error => {
+      if (demoStore || restoreSequence !== loadSequence) return;
+      console.error("Unable to check the Branchline session.", error);
+      setAuthMessage("Unable to connect to Supabase. Check your connection and try again.", true);
+    }).finally(() => { signInButton.disabled = false; });
+  } else {
+    document.querySelector("#login-form").querySelectorAll("input,button").forEach(control => { control.disabled = true; });
+    configWarning.hidden = false;
+    configWarning.textContent = "Sample data only. PTG and the Studios use staging sign-in.";
+  }
+})();

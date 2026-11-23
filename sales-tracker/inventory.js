@@ -1,0 +1,136 @@
+(function (root) {
+  "use strict";
+  const code = value => {
+    const text = String(value ?? "").trim();
+    return /^\d{1,7}$/.test(text) ? text.padStart(8, "0") : text;
+  };
+  const text = value => String(value ?? "").trim();
+  const day = value => {
+    if (typeof value === "number") return new Date(Date.UTC(1899, 11, 30) + Math.floor(value) * 86400000).toISOString().slice(0, 10);
+    const date = text(value);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(`${date}T00:00:00Z`)) ||
+      new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) !== date) throw new Error(`Invalid received date: ${date || "(blank)"}.`);
+    return date;
+  };
+  function ageDays(received, today) {
+    return received ? Math.floor((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${day(received)}T00:00:00Z`)) / 86400000) : null;
+  }
+  function headers(rows, names) {
+    const index = rows.findIndex(row => names.every(name => row.some(value => text(value).toLowerCase() === name)));
+    if (index < 0) throw new Error(`Report columns missing: ${names.join(", ")}.`);
+    const row = rows[index].map(value => text(value).toLowerCase());
+    return { index, at: name => row.indexOf(name) };
+  }
+  function assertReportBranch(location, branch) {
+    const source = text(location);
+    const normalizeName = value => text(value).toLowerCase().replace(/\s*\(demo\)$/, "").replace(/^(?:1st\s+)?megasaver\s+/, "").replace(/[^a-z0-9]/g, "");
+    const prefix = /^([a-z][a-z0-9]{1,19})\s*-\s*/i.exec(source);
+    const name = source.replace(/^([a-z][a-z0-9]{1,19})\s*-\s*/i, "");
+    const branchCode = text(branch?.code).toUpperCase();
+    const codeOnly = branchCode && source.toUpperCase() === branchCode;
+    if (!source || !branch || !codeOnly && (
+      !normalizeName(name) || normalizeName(name) !== normalizeName(branch.name) ||
+      prefix && branchCode && prefix[1].toUpperCase() !== branchCode
+    )) throw new Error(`Report location "${source || "(blank)"}" does not match selected branch "${branch?.name || "(none)"}". Select the matching branch or correct its name/code before importing.`);
+  }
+  function parseReports(stockRows, serialRows, catalog = [], today = new Date().toISOString().slice(0, 10)) {
+    const h = headers(stockRows, ["item code", "item name", "total"]);
+    const sh = headers(serialRows, ["item code", "item name", "loc code", "serial no", "tran date"]);
+    const products = new Map(catalog.map(item => [code(item.barcode), item]));
+    const normalizedHeaders = stockRows[h.index].map(value => text(value).toLowerCase().replace(/[^a-z0-9]/g,""));
+    const categoryAt = normalizedHeaders.indexOf("category"), subAt = normalizedHeaders.indexOf("subcategory");
+    const srpAt = normalizedHeaders.findIndex(value => ["srp","suggestedretailprice","price"].includes(value));
+    const items = new Map();
+    let total = null;
+    for (let rowIndex = h.index + 1; rowIndex < stockRows.length; rowIndex++) {
+      const row = stockRows[rowIndex], barcode = code(row[h.at("item code")]);
+      if (/^total qty/i.test(barcode)) { total = Number(row[h.at("total")]); continue; }
+      if (!barcode && row.every(value => !text(value))) continue;
+      if (!barcode || !text(row[h.at("item name")])) throw new Error(`Stock row ${rowIndex + 1}: barcode and item name are required.`);
+      const raw = row[h.at("total")], quantity = Number(raw);
+      if (text(raw) === "" || !Number.isSafeInteger(quantity) || quantity < 0) throw new Error(`Stock row ${rowIndex + 1}: invalid quantity.`);
+      if (items.has(barcode)) throw new Error(`Stock row ${rowIndex + 1}: duplicate barcode ${barcode}.`);
+      const known = products.get(barcode);
+      const srp = srpAt < 0 || !text(row[srpAt]) ? null : Number(text(row[srpAt]).replace(/[₱,\s]/g,""));
+      if (srp !== null && (!Number.isFinite(srp) || srp < 0)) throw new Error(`Stock row ${rowIndex + 1}: SRP must be a non-negative number.`);
+      items.set(barcode, {
+        barcode, description: text(row[h.at("item name")]), brand: known?.brand || "",
+        category: categoryAt < 0 ? "" : text(row[categoryAt]), sub_category: subAt < 0 ? "" : text(row[subAt]), srp,
+        quantity, serialized: false, serials: [], isNew: !known,
+      });
+    }
+    if (!items.size) throw new Error("The stock report contains no items.");
+    const quantity = [...items.values()].reduce((sum, item) => sum + item.quantity, 0);
+    if (total !== null && total !== quantity) throw new Error(`Stock total ${total} does not match parsed quantity ${quantity}.`);
+    let currentCode = "", location = "";
+    const seen = new Set(), shared = new Map();
+    for (let index = sh.index + 1; index < serialRows.length; index++) {
+      const row = serialRows[index];
+      if (/^total$/i.test(text(row[sh.at("item code")]))) continue;
+      if (text(row[sh.at("item code")])) currentCode = code(row[sh.at("item code")]);
+      const serial = text(row[sh.at("serial no")]);
+      if (!serial && row.every(value => !text(value))) continue;
+      if (!serial) throw new Error(`Serial row ${index + 1}: missing serial.`);
+      const item = items.get(currentCode);
+      if (!item) throw new Error(`Serial row ${index + 1}: barcode ${currentCode} is absent from the stock report.`);
+      const loc = text(row[sh.at("loc code")]);
+      if (!loc || location && loc !== location) throw new Error("The serialized report must contain exactly one store location.");
+      location = loc;
+      const received = day(row[sh.at("tran date")]);
+      if (received > today) throw new Error(`Serial row ${index + 1}: received date is in the future.`);
+      const key = `${currentCode.toLowerCase()}\0${serial.toLowerCase()}`;
+      if (seen.has(key)) throw new Error(`Duplicate serial ${serial} within barcode ${currentCode}.`);
+      seen.add(key);
+      item.serialized = true;
+      item.serials.push({ serial, received_on: received });
+      const owners = shared.get(serial.toLowerCase()) || new Set();
+      owners.add(currentCode); shared.set(serial.toLowerCase(), owners);
+    }
+    for (const item of items.values()) {
+      if (item.serialized && item.quantity !== item.serials.length) throw new Error(`Barcode ${item.barcode}: stock quantity ${item.quantity} differs from its ${item.serials.length} serials.`);
+    }
+    const locationColumns = stockRows[h.index].filter((value,index) => text(value) &&
+      !["item code", "item name", "total"].includes(text(value).toLowerCase()) && ![categoryAt,subAt,srpAt].includes(index));
+    if (locationColumns.length !== 1) throw new Error("Choose a quantity report for one branch only.");
+    const normalizeLocation = value => text(value).toLowerCase().replace(/^[a-z0-9]+\s*-\s*/, "").replace(/\s+/g, " ");
+    if (location && normalizeLocation(location) !== normalizeLocation(locationColumns[0])) throw new Error("The stock and serial reports refer to different branches.");
+    return {
+      items: [...items.values()], quantity, serialQuantity: seen.size, location: text(locationColumns[0]),
+      newProducts: [...items.values()].filter(item => item.isNew).length,
+      sharedSerials: [...shared].filter(([, owners]) => owners.size > 1).map(([serial, owners]) => ({ serial, barcodes: [...owners] })),
+    };
+  }
+  const brandKey = value => text(value).replace(/^con\s*-\s*/i, "").trim().toLowerCase();
+  function brandParser(catalog) {
+    const brands = new Set(catalog.map(product => brandKey(product.brand)));
+    return assignment => text(assignment).split("/").map(part => part.trim()).filter(Boolean).map(part => {
+      const full = part.replace(/^con\s*-\s*/i, "").trim();
+      const at = brands.has(full.toLowerCase()) ? -1 : full.indexOf("-");
+      const base = (at < 0 ? full : full.slice(0, at)).trim();
+      return { full, base, brand: brandKey(base), scope: at < 0 ? "" : full.slice(at + 1).trim().toLowerCase() };
+    });
+  }
+  function brandParts(assignment, catalog) {
+    return brandParser(catalog)(assignment);
+  }
+  function matchesBrandParts(item, assigned, others = []) {
+    const norm = value => text(value).toLowerCase();
+    const scopeMatches = scope => [item.category, item.sub_category, item.model_description || item.description].some(value => norm(value).includes(scope));
+    return assigned.some(part => brandKey(item.brand) === part.brand && (part.scope ? scopeMatches(part.scope)
+      : !others.some(other => other.brand === part.brand && other.scope && scopeMatches(other.scope))));
+  }
+  function brandMatcher(profile, profiles, catalog) {
+    const parts = brandParser(catalog);
+    const assigned = parts(profile.assigned_brand);
+    const others = profiles.filter(person => person.role === "ps" && person.active && person.branch_id === profile.branch_id && person.id !== profile.id)
+      .flatMap(person => parts(person.assigned_brand));
+    return item => matchesBrandParts(item, assigned, others);
+  }
+  function brandMatches(item, profile, profiles, catalog) {
+    return brandMatcher(profile, profiles, catalog)(item);
+  }
+  const needsClassification = item => !text(item.brand) || text(item.brand).toLowerCase() === "unclassified" || !text(item.category);
+  const api = { code, day, ageDays, parseReports, assertReportBranch, brandKey, brandParts, matchesBrandParts, brandMatcher, brandMatches, needsClassification };
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+  else root.BranchlineInventory = api;
+})(typeof window !== "undefined" ? window : globalThis);

@@ -1,0 +1,58 @@
+/* Public Branchline application directory: navigation only.
+ * Opening an app never forwards the Branchline access token or password.
+ * Each destination enforces its own account/role permissions. */
+(() => {
+  "use strict";
+  const list = [
+    {
+      id: "sales-tracker",
+      name: "Sales Tracker",
+      monogram: "ST",
+      description: "Sales entry, team performance, targets, analytics and inventory.",
+      access: "Your current Branchline workspace",
+      kind: "workspace",
+      url: "",
+    },
+    {
+      id: "price-tag-generator",
+      name: "Price Tag Generator",
+      monogram: "PT",
+      description: "Find products, review selling prices, prepare and print price tags.",
+      access: "Existing PTG account permissions apply",
+      kind: "external",
+      url: "https://branchline-staging.github.io/",
+    },
+    {
+      id: "megaframe-studio",
+      name: "MegaFrame Studio",
+      monogram: "MF",
+      description: "Edit photos, build personalized frames and export print-ready layouts.",
+      access: "Requires active PTG Team Leader, Branch Admin or System Admin access",
+      kind: "external",
+      url: "https://branchline-staging.github.io/?studio=megaframe", // PTG authorization; editor is never public
+    },
+    {
+      id: "flyer-studio",
+      name: "MegaFlyer Studio",
+      monogram: "FS",
+      description: "Create promotional flyers, manage product bundles and export PDF artwork.",
+      access: "Requires active PTG Team Leader, Branch Admin or System Admin access",
+      kind: "external",
+      url: "https://branchline-staging.github.io/?studio=flyer", // PTG authorization; editor is never public
+    },
+  ];
+  for (const app of list) {
+    if (app.kind === "external") {
+      const target = new URL(app.url);
+      const knownStudio = app.id === "megaframe-studio" ? "megaframe" :
+        app.id === "flyer-studio" ? "flyer" : "";
+      const query = knownStudio ? "?studio=" + knownStudio : "";
+      if (target.protocol !== "https:" || target.origin !== "https://branchline-staging.github.io" ||
+          target.username || target.password || target.hash || target.search !== query ||
+          (knownStudio && target.pathname !== "/"))
+        throw new Error("Unrecognized Branchline application URL.");
+    }
+    Object.freeze(app);
+  }
+  window.BranchlineApplications = Object.freeze({ list: Object.freeze(list) });
+})();
