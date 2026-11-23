@@ -1,0 +1,51 @@
+import assert from "node:assert/strict";
+import {mkdirSync,writeFileSync} from "node:fs";
+import {chromium} from "playwright";
+const origin="https://branchline-staging.github.io";
+const out="artifacts/staging-navigation";
+mkdirSync(out,{recursive:true});
+const browser=await chromium.launch({headless:true});
+const errors=[];
+try{
+ const root=await browser.newPage({viewport:{width:1280,height:800}});
+ root.on("pageerror",e=>errors.push(e.message));
+ const r=await root.goto(origin+"/",{waitUntil:"domcontentloaded",timeout:45000});
+ assert.equal(r?.status(),200,"Staging sign-in HTTP 200");
+ const a=root.getByRole("link",{name:"Open unified PTG sign-in"});
+ await a.waitFor({state:"visible"});
+ assert.equal(await a.getAttribute("href"),"/first-megasaver-ptg/login/");
+ const image=root.locator(".bl-unified-brand img");
+ assert.ok(await image.evaluate(x=>x.complete && x.naturalWidth>0),"Official logo rendered");
+ await root.screenshot({path:out+"/unified-staging-entry-desktop.png",fullPage:true});
+ const ptg=await root.goto(origin+"/first-megasaver-ptg/login/",{waitUntil:"domcontentloaded"});
+ assert.equal(ptg?.status(),200,"Authenticated PTG entrypoint reachable");
+ await root.close();
+ for(const app of ["megaframe","flyer"]){
+  const path=app==="megaframe"?"/megaframe-studio/studio/":"/flyer-studio/studio/";
+  const mobile=await browser.newPage({viewport:{width:390,height:844},deviceScaleFactor:1});
+  mobile.on("pageerror",e=>errors.push(e.message));
+  const response=await mobile.goto(origin+path,{waitUntil:"domcontentloaded",timeout:45000});
+  assert.equal(response?.status(),200,app+" guarded launcher HTTP 200");
+  const logo=mobile.locator(".bl-protected-mobile-brand");
+  await logo.waitFor({state:"visible"});
+  const header=mobile.locator("body.bl-protected-shell > header");
+  const pos=await header.evaluate(x=>getComputedStyle(x).position);
+  assert.equal(pos,"sticky",app+" header must remain visible when scrolling");
+  await mobile.evaluate(()=>{const spacer=document.createElement("div");spacer.style.height="2100px";spacer.setAttribute("data-qa","scroll-only");document.body.append(spacer);window.scrollTo(0,1400);});
+  await mobile.waitForTimeout(150);
+  const y=(await logo.boundingBox())?.y??999;
+  assert.ok(y>=0 && y<90,app+" app logo remains on screen after deep scroll");
+  await logo.click();
+  assert.equal(await mobile.locator("#bl-protected-app-drawer").isVisible(),true);
+  const links=await mobile.locator(".bl-protected-app-list-link").evaluateAll(xs=>xs.map(a=>a.getAttribute("href")));
+  assert.ok(links.every(x=>x?.startsWith("https://branchline-staging.github.io/")),app+" app menu must not link to production");
+  await mobile.screenshot({path:out+"/"+app+"-mobile-sticky-app-menu.png",fullPage:false});
+  await mobile.keyboard.press("Escape");
+  assert.equal(await mobile.locator("#bl-protected-app-drawer").isVisible(),false);
+  assert.equal(await mobile.locator("#studio-editor-frame").count(),0,"Private editor must fail closed without valid PTG ticket");
+  await mobile.close();
+ }
+ assert.deepEqual(errors,[],"No client-side errors");
+ writeFileSync(out+"/report.json",JSON.stringify({origin,checks:["root official CTA","PTG login","MegaFrame sticky mobile logo/menu","MegaFlyer sticky mobile logo/menu","unauthenticated Studio no iframe","staging-only app links"],status:"PASS",source:"live hosted browser, no credentials or project data"},null,2));
+ console.log("PASS live hosted official entry, mobile sticky menus, same-stage links and secure denied editors");
+}finally{await browser.close();}
