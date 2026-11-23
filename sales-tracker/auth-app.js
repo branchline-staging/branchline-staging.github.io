@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const config = window.BRANCHLINE_SUPABASE_CONFIG;
+  const config = Object.freeze({});
   const authScreen = document.querySelector("#auth-screen");
   const authMessage = document.querySelector("#auth-message");
   const configWarning = document.querySelector("#auth-config-warning");
