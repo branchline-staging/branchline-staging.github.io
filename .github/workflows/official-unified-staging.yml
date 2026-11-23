@@ -13,6 +13,8 @@ concurrency:
   cancel-in-progress: false
 jobs:
   build:
+    permissions:
+      contents: write
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -110,6 +112,8 @@ jobs:
           grep -q 'position:sticky;top:0' staging-site-dist/flyer-studio/studio/index.html
           grep -q 'Open unified PTG sign-in' staging-site-dist/index.html
           test -f staging-site-dist/STAGING-RELEASE-MANIFEST.json
+          test -s staging-site-dist/sales-tracker/icons/official/branchline.png
+          test -s staging-site-dist/first-megasaver-ptg/icons/official/data-desk.png
       - uses: actions/upload-artifact@v4
         with:
           name: official-unified-staging-review
@@ -117,6 +121,42 @@ jobs:
           include-hidden-files: true
           retention-days: 14
           if-no-files-found: error
+      - name: Mirror verified build to staging-only branch Pages source
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        working-directory: staging
+        run: |
+          test "$GITHUB_REPOSITORY" = "branchline-staging/branchline-staging.github.io"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          manifest=json.loads(Path("staging-site-dist/STAGING-RELEASE-MANIFEST.json").read_text())
+          assert manifest["host"]=="branchline-staging.github.io"
+          assert manifest["supabase"]=="rlfdvmiqkbitetatxkju"
+          assert manifest["privateEditorsPublished"] is False
+          for file in ("index.html","sales-tracker/icons/official/branchline.png",
+                       "first-megasaver-ptg/icons/official/data-desk.png",
+                       "megaframe-studio/studio/index.html",
+                       "flyer-studio/studio/index.html"):
+              assert (Path("staging-site-dist")/file).is_file(), file
+          PY
+          # This staging repository also has legacy main-branch Pages builds.
+          # Keep their source identical to the verified Actions Pages artifact
+          # so subsequent pushes cannot replace the site with incomplete files.
+          rm -rf sales-tracker first-megasaver-ptg megaframe-studio flyer-studio
+          cp -a staging-site-dist/sales-tracker .
+          cp -a staging-site-dist/first-megasaver-ptg .
+          cp -a staging-site-dist/megaframe-studio .
+          cp -a staging-site-dist/flyer-studio .
+          cp staging-site-dist/index.html index.html
+          cp staging-site-dist/.nojekyll .nojekyll
+          cp staging-site-dist/STAGING-RELEASE-MANIFEST.json STAGING-RELEASE-MANIFEST.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A -- index.html .nojekyll STAGING-RELEASE-MANIFEST.json sales-tracker first-megasaver-ptg megaframe-studio flyer-studio
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(staging): publish verified static bundle to Pages branch source"
+            git push origin HEAD:main
+          fi
       - name: Upload Pages content on staging main only
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v3
