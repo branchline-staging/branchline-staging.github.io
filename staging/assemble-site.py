@@ -13,6 +13,7 @@ for name in ("index.html",".nojekyll"):shutil.copy2(root/name,out/name)
 original=(root/"index.html").read_bytes()
 assert b"Branchline staging sign-in" in original and b"rlfdvmiqkbitetatxkju" in original
 assert (out/"index.html").read_bytes()==original
+assert b"Open unified PTG sign-in" in original, "Official PTG entry is missing"
 src=parent/"branchline"; dest=out/"sales-tracker";dest.mkdir()
 allowed={".html",".js",".mjs",".css",".json",".webmanifest",".svg",".png",".jpg",".jpeg",".webp",".ico",".woff2",".wasm"}
 for file in src.iterdir():
@@ -61,6 +62,7 @@ for app,legacy in (("megaframe-studio","vmyoxoiygfcecgkbavgg"),("flyer-studio","
  s=p.read_text().replace(legacy,stage).replace("kzamora19.github.io","branchline-staging.github.io")
  assert stage+".supabase.co/functions/v1/" in s and "Branchline applications" in s
  assert key in s
+ assert "position:sticky;top:0" in s, "Missing sticky mobile logo on "+app
  assert not re.search(r'<canvas|PRIVATE (MEGAFRAME )?EDITOR BUNDLE|id="photosInput"|id="quickSaveProject"',s,re.I)
  p.write_text(s)
  # An expired or denied Studio ticket must return to the STAGING PTG portal,
