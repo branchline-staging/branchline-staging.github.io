@@ -43,6 +43,15 @@ shutil.copytree(ptg,out/"first-megasaver-ptg")
 for item in (out/"first-megasaver-ptg").rglob("*"):
  if item.is_file() and item.suffix.lower() in (".exe",".msi",".msix",".appx"):
   item.unlink()
+# Compiled PTG chunks can also contain original app-directory origin constants.
+# Rewrite them in the staging output ONLY, preserving fail-closed role gates.
+for item in (out/"first-megasaver-ptg").rglob("*"):
+ if not item.is_file() or item.suffix not in (".html",".js",".mjs",".css",".json",".svg",".webmanifest"):continue
+ body=item.read_text(errors="replace")
+ fixed=body.replace("https://kzamora19.github.io/branchline/","https://branchline-staging.github.io/sales-tracker/").replace("https://kzamora19.github.io","https://branchline-staging.github.io")
+ for prod_id in ("psoopubvdpwztzkdyifa","agknxlowackphvwyvxge","vmyoxoiygfcecgkbavgg","tzklsscoiwnmeantcefw"):fixed=fixed.replace(prod_id,stage)
+ for prod_key in ("sb_publishable_e_6K64Wul2fJEq2KiuvnTA_NmuaKqNm","sb_publishable_kv2q3dnNQt4ij0mgkOLbQQ_S2MO9FvG"):fixed=fixed.replace(prod_key,key)
+ if fixed!=body:item.write_text(fixed)
 assert (out/"first-megasaver-ptg/icons/official/data-desk.png").exists()
 for app,legacy in (("megaframe-studio","vmyoxoiygfcecgkbavgg"),("flyer-studio","tzklsscoiwnmeantcefw")):
  origin=parent/app/"staging/stage-pages-cutover/studio"
