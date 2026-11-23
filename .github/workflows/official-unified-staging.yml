@@ -1,4 +1,4 @@
-name: Official unified staging Pages (isolated only)
+name: Build unified staging and sync branch Pages (isolated only)
 on:
   pull_request:
     branches: [main]
@@ -157,17 +157,3 @@ jobs:
             git commit -m "chore(staging): publish verified static bundle to Pages branch source"
             git push origin HEAD:main
           fi
-      - name: Upload Pages content on staging main only
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-pages-artifact@v3
-        with: {path: staging/staging-site-dist}
-  deploy:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: build
-    runs-on: ubuntu-24.04
-    permissions:
-      pages: write
-      id-token: write
-    environment: github-pages
-    steps:
-      - uses: actions/deploy-pages@v4
