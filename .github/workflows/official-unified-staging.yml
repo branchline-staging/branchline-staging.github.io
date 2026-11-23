@@ -61,7 +61,14 @@ jobs:
       - name: Build PTG on the existing staging origin, with staged APIs
         working-directory: first-megasaver-ptg
         run: |
-          node -e 'const fs=require("fs");let p="components/workspace-layout.tsx",s=fs.readFileSync(p,"utf8");if(!s.includes('"'href:"/branchline/"'"'))throw Error("Link drift");fs.writeFileSync(p,s.replace('"'href:"/branchline/"'"','"'href:"/sales-tracker/"'"'))'
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("components/workspace-layout.tsx")
+          source = p.read_text()
+          old = 'href:"/branchline/"'
+          assert old in source, "Staging Sales Tracker link drift"
+          p.write_text(source.replace(old, 'href:"/sales-tracker/"'))
+          PY
           npm install --ignore-scripts --no-package-lock
           npm run build
           test -f out/studios/index.html
