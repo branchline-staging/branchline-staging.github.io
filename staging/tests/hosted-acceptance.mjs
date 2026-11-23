@@ -135,10 +135,11 @@ try{
  await check("PTG Demo actual price tags -> browser Letter PDF and app Print handler",async()=>{
   await goto("/first-megasaver-ptg/demo/");
   await page.locator("#legacy-product-search").waitFor({state:"visible",timeout:20000});
+  await page.locator(".legacy-search-results-table tbody tr").filter({hasText:"DEMO-0001"}).first().waitFor({state:"visible"});
   await page.locator("#legacy-product-search").fill("DEMO-RC18");
   console.log("DEMO PRE SEARCH", (await page.locator("body").innerText()).slice(0,700));
   await page.locator(".legacy-search-form button[type='submit']").click();
-  await page.locator(".legacy-search-results-table tbody tr").filter({hasText:"DEMO-RC18"}).first().waitFor();
+  await page.locator(".legacy-search-results-table tbody tr").filter({hasText:"DEMO-0006"}).first().waitFor();
   const row=page.locator(".legacy-search-results-table tbody tr").filter({hasText:"DEMO-RC18"}).first();
   await row.getByRole("checkbox").check();
   await page.locator(".ptg-print-preview .legacy-print-sheet").first().waitFor({state:"attached"});
@@ -159,9 +160,10 @@ try{
  await check("PTG Demo native SAVE PDF download",async()=>{
    await goto("/first-megasaver-ptg/demo/");
    await page.locator("#legacy-product-search").waitFor({state:"visible",timeout:20000});
+   await page.locator(".legacy-search-results-table tbody tr").filter({hasText:"DEMO-0001"}).first().waitFor({state:"visible"});
    await page.locator("#legacy-product-search").fill("DEMO-FAN16");
    await page.locator(".legacy-search-form button[type='submit']").click();
-   const row=page.locator(".legacy-search-results-table tbody tr").filter({hasText:"DEMO-FAN16"}).first();
+   const row=page.locator(".legacy-search-results-table tbody tr").filter({hasText:"DEMO-0007"}).first();
    await row.waitFor({state:"visible"});
    await row.getByRole("checkbox").check();
    const waitDownload=page.waitForEvent("download",{timeout:30000});
