@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Reflection;
+using System.Net.NetworkInformation;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,8 +19,12 @@ namespace Branchline.UpdateCenter
         [STAThread]
         private static int Main(string[] args)
         {
+            bool watch=Array.IndexOf(args,"--watch")>=0;
             try
             {
+                int ownerPid=0;
+                int pidIndex=Array.IndexOf(args,"--owner-pid");
+                if(watch&&(pidIndex<0||pidIndex+1>=args.Length||!Int32.TryParse(args[pidIndex+1],out ownerPid)||ownerPid<=0))return 1;
                 var key=LoadPublicKey();
                 if(Array.IndexOf(args,"--self-test")>=0){return key.Modulus.Length>=256?0:1;}
                 bool created;
@@ -28,13 +33,14 @@ namespace Branchline.UpdateCenter
                     if(!created)return 0;
                     Application.EnableVisualStyles();
                     Application.SetCompatibleTextRenderingDefault(false);
-                    using(var form=new CompanionForm(key,DirectoryUri,Channel,Array.IndexOf(args,"--launch")>=0))
+                    using(var form=new CompanionForm(key,DirectoryUri,Channel,Array.IndexOf(args,"--launch")>=0,watch,ownerPid))
                         Application.Run(form);
                 }
                 return 0;
             }
             catch(Exception error)
             {
+                if(watch)return 1;
                 MessageBox.Show("Update Center could not start. Your existing workspace is unchanged.\n"+error.Message,
                     "Branchline Update Center",MessageBoxButtons.OK,MessageBoxIcon.Warning);
                 return 1;
@@ -63,17 +69,20 @@ namespace Branchline.UpdateCenter
         private readonly RSAParameters key;
         private readonly Uri directory;
         private readonly string channel;
-        private readonly bool launch;
+        private readonly bool launch,watch;
+        private int ownerPid;
+        private readonly System.Windows.Forms.Timer ownerTimer=new System.Windows.Forms.Timer();
         private readonly Label status=new Label();
-        private readonly Button check=new Button(), install=new Button(), open=new Button();
+        private readonly Button check=new Button(), install=new Button(), open=new Button(), later=new Button();
         private readonly System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer();
         private InstalledIdentity current;
         private NativeReleaseClient.Offer offer;
         private bool busy;
         private string dismissed;
-        internal CompanionForm(RSAParameters key,Uri directory,string channel,bool launch)
+        internal CompanionForm(RSAParameters key,Uri directory,string channel,bool launch,bool watch,int ownerPid)
         {
-            this.key=key;this.directory=directory;this.channel=channel;this.launch=launch;
+            this.key=key;this.directory=directory;this.channel=channel;this.launch=launch;this.watch=watch;this.ownerPid=ownerPid;
+            if(watch){ShowInTaskbar=false;Opacity=0;WindowState=FormWindowState.Minimized;}
             Text="Branchline Update Center";StartPosition=FormStartPosition.CenterScreen;
             ClientSize=new Size(470,225);MinimumSize=new Size(430,260);
             Font=new Font("Segoe UI",10);BackColor=Color.FromArgb(16,40,71);ForeColor=Color.White;
@@ -85,28 +94,48 @@ namespace Branchline.UpdateCenter
             status.Text="Checking your installation…";status.Dock=DockStyle.Fill;panel.Controls.Add(status,0,1);
             var buttons=new FlowLayoutPanel{Dock=DockStyle.Fill,WrapContents=false};
             check.Text="Check for updates";check.AutoSize=true;
-            install.Text="Update now";install.AutoSize=true;install.Enabled=false;
+            install.Text="Update & Restart";install.AutoSize=true;install.Enabled=false;
             open.Text="Open workspace";open.AutoSize=true;open.Enabled=false;
-            foreach(var button in new[]{check,install,open}){button.ForeColor=Color.FromArgb(16,40,71);button.BackColor=Color.White;buttons.Controls.Add(button);}
+            later.Text="Later";later.AutoSize=true;
+            foreach(var button in watch?new[]{install,later,check}:new[]{check,install,open}){button.ForeColor=Color.FromArgb(16,40,71);button.BackColor=Color.White;buttons.Controls.Add(button);}
             panel.Controls.Add(buttons,0,2);Controls.Add(panel);
             check.Click+=async (s,e)=>await Check(true);
             install.Click+=async (s,e)=>await Install();
             open.Click+=(s,e)=>OpenWorkspace();
+            later.Click+=(s,e)=>{if(!busy&&watch)Hide();};
             timer.Interval=15*60*1000;timer.Tick+=async (s,e)=>await Check(false);
             Shown+=async (s,e)=>{
-                if(launch){OpenWorkspace();WindowState=FormWindowState.Minimized;}
+                if(watch){Hide();ownerTimer.Start();}
+                else if(launch){OpenWorkspace();WindowState=FormWindowState.Minimized;}
                 timer.Start();await Check(false);
             };
-            FormClosing+=(s,e)=>{if(busy){e.Cancel=true;return;}timer.Stop();};
+            ownerTimer.Interval=5000;ownerTimer.Tick+=(s,e)=>{if(watch&&!busy&&!Visible&&!OwnerRunning())Close();};
+            NetworkChange.NetworkAvailabilityChanged+=OnNetwork;
+            FormClosing+=(s,e)=>{
+                if(busy){e.Cancel=true;return;}
+                if(watch&&Visible&&OwnerRunning()&&e.CloseReason==CloseReason.UserClosing){e.Cancel=true;Hide();return;}
+                timer.Stop();ownerTimer.Stop();
+            };
         }
 
+        private bool OwnerRunning()
+        {
+            try{using(var p=Process.GetProcessById(ownerPid))return !p.HasExited&&p.ProcessName=="Branchline Workspace";}
+            catch{return false;}
+        }
+        private void OnNetwork(object sender,NetworkAvailabilityEventArgs e)
+        {
+            if(!e.IsAvailable||IsDisposed||!IsHandleCreated)return;
+            try{BeginInvoke(new Action(async()=>await Check(false)));}catch(InvalidOperationException){}
+        }
         private void OpenWorkspace()
         {
             try
             {
                 current=InstalledIdentity.Discover(key,channel,directory);
                 if(Process.GetProcessesByName("Branchline Workspace").Length!=0)return;
-                Process.Start(new ProcessStartInfo(current.Path){UseShellExecute=false,WorkingDirectory=Path.GetDirectoryName(current.Path)});
+                using(var process=Process.Start(new ProcessStartInfo(current.Path){UseShellExecute=false,WorkingDirectory=Path.GetDirectoryName(current.Path)}))
+                    if(process!=null)ownerPid=process.Id;
                 open.Enabled=true;
             }
             catch(Exception error){status.Text="Workspace was not launched. "+error.Message;WindowState=FormWindowState.Normal;}
@@ -114,7 +143,7 @@ namespace Branchline.UpdateCenter
 
         private void SetBusy(bool value)
         {
-            busy=value;check.Enabled=!value;open.Enabled=!value&&current!=null;
+            busy=value;check.Enabled=!value;later.Enabled=!value;open.Enabled=!value&&current!=null;
             install.Enabled=!value&&offer!=null;
         }
         private async Task Check(bool manual)
@@ -130,7 +159,7 @@ namespace Branchline.UpdateCenter
                 if(manual||dismissed!=offer.Release.Sha256)
                 {
                     dismissed=offer.Release.Sha256;
-                    WindowState=FormWindowState.Normal;Show();Activate();
+                    Opacity=1;WindowState=FormWindowState.Normal;Show();Activate();
                 }
             }
             catch(Exception)
@@ -157,11 +186,13 @@ namespace Branchline.UpdateCenter
                 var backup=await Task.Run(()=>NativeUpdateTransaction.ApplyCompanionUpdate(plan,selected,key,channel,directory,true));
                 offer=null;current=InstalledIdentity.Discover(key,channel,directory);
                 status.Text="Installed "+current.Label+". The original executable has been backed up.";
-                MessageBox.Show("Update installed. Open Branchline Workspace to resume work.\nBackup: "+backup,Text);
+                MessageBox.Show("Update installed. Branchline will reopen.\nBackup: "+backup,Text);
+                OpenWorkspace();
+                if(watch&&OwnerRunning())Hide();
             }
             catch(Exception error){offer=null;status.Text="Update could not be completed. "+error.Message;}
             finally{SetBusy(false);}
         }
-        protected override void Dispose(bool disposing){if(disposing)timer.Dispose();base.Dispose(disposing);}
+        protected override void Dispose(bool disposing){if(disposing){NetworkChange.NetworkAvailabilityChanged-=OnNetwork;timer.Dispose();ownerTimer.Dispose();}base.Dispose(disposing);}
     }
 }

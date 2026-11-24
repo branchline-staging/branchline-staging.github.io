@@ -11,6 +11,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
       - name: Compile and run Windows policy tests (no launcher installation)
         shell: pwsh
         run: |
@@ -30,3 +33,11 @@ jobs:
           $exe = & .\staging\native\build-companion.ps1 -PublicKeyFile $key -OutputDirectory (Join-Path $env:RUNNER_TEMP 'branchline-ci-only')
           $p = Start-Process -FilePath $exe -ArgumentList '--self-test' -PassThru -Wait
           if ($p.ExitCode -ne 0) { exit $p.ExitCode }
+
+      - name: Test in-place managed startup integration on harmless fixture
+        shell: pwsh
+        run: .\staging\native\test-integrated-hook.ps1
+
+      - name: Test one-time signed-package bootstrap with inert payload
+        shell: pwsh
+        run: .\staging\native\test-bootstrap.ps1
