@@ -1,6 +1,8 @@
 import os, pathlib, shutil, hashlib, json, re
 from pathlib import Path
 root=Path(__file__).resolve().parents[1]
+import subprocess
+subprocess.run(["node","--test",str(root/"staging/tests/update-center.test.cjs")],check=True)
 parent=root.parent
 out=root/"staging-site-dist"
 stage="rlfdvmiqkbitetatxkju"
