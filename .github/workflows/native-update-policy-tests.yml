@@ -1,0 +1,21 @@
+name: Native update compatibility and signature policy
+on:
+  pull_request:
+    branches: [main]
+    paths: ['staging/native/**', '.github/workflows/native-update-policy-tests.yml']
+permissions:
+  contents: read
+jobs:
+  windows-policy:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and run Windows policy tests (no launcher installation)
+        shell: pwsh
+        run: |
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          & $csc /nologo /target:exe /platform:x64 /r:System.Web.Extensions.dll /out:NativeUpdateTests.exe staging/native/LegacyInstallDetector.cs staging/native/NativeReleasePolicy.cs staging/native/Tests.cs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\NativeUpdateTests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
