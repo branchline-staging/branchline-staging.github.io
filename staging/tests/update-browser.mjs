@@ -32,7 +32,8 @@ try {
   const panel=page.locator("#bl-release-check"), status=panel.getByRole("status",{includeHidden:true});
   const check=panel.getByRole("button",{name:"Check for updates"});
   const dismiss=panel.getByRole("button",{name:"Later"});
-  const restart=panel.getByRole("button",{name:"Update & Restart"});
+  const restart=panel.locator("#bl-release-restart");
+  const confirmed=panel.locator("#bl-release-restart[data-confirm=true]");
   await panel.waitFor();
   assert.match(await panel.locator(".bl-release-version").textContent(),/Navigation R6 staging/);
   await page.waitForFunction(()=>!document.querySelector("#bl-release-check button").disabled);
@@ -49,7 +50,8 @@ try {
   await restart.click();
   assert.match(await status.textContent(),/Save all open projects/);
   assert.equal(navigations,1,"First click is warning only");
-  await panel.getByRole("button",{name:"I saved my work — restart"}).click();
+  assert.equal(await restart.getAttribute("data-confirm"),"true");
+  await confirmed.click();
   await page.waitForFunction(()=>!document.querySelector("#bl-release-check button").disabled);
   assert.match(await status.textContent(),/not ready/,"Stale entry rejected");
   assert.equal(await page.getByRole("textbox").inputValue(),"Do not lose my unsaved draft");
@@ -82,7 +84,7 @@ try {
   manifest={schema:1,channel:"staging",webRevision:third};entryRevision=third;
   await check.click();await restart.waitFor({state:"visible"});
   await restart.click();
-  await Promise.all([page.waitForNavigation(),panel.getByRole("button",{name:"I saved my work — restart"}).click()]);
+  await Promise.all([page.waitForNavigation(),confirmed.click()]);
   await page.locator("#bl-release-check").waitFor();
   assert.equal(navigations,2,"One explicitly approved restart");
   assert.match(await page.locator(".bl-release-version").textContent(),/cccccccc/);

@@ -33,11 +33,11 @@
     const check=doc.createElement("button");check.type="button";check.textContent="Check for updates";
     const about=doc.createElement("small");about.className="bl-release-version";
     about.textContent=version+" · "+running.slice(0,8);about.title="Current web release (not Windows launcher version)";
-    const restart=doc.createElement("button");restart.type="button";restart.textContent="Update & Restart";restart.hidden=true;
+    const restart=doc.createElement("button");restart.type="button";restart.id="bl-release-restart";restart.textContent="Update & Restart";restart.hidden=true;
     const dismiss=doc.createElement("button");dismiss.type="button";dismiss.textContent="Later";dismiss.hidden=true;
     box.append(about,status,check,restart,dismiss);doc.body.append(box);
     let checking=false, restarting=false, available=null, dismissed=null, confirmRestart=false;
-    function resetConfirmation(){confirmRestart=false;restart.textContent="Update & Restart";}
+    function resetConfirmation(){confirmRestart=false;restart.dataset.confirm="false";restart.textContent="Update & Restart";}
     function promptUpdate(){
       resetConfirmation();
       status.textContent="Branchline Workspace Update Available. Save your work before restarting to load the new web version.";
@@ -72,7 +72,7 @@
       const target=restartPath(root.location.pathname);
       if(!target)return;
       if(!confirmRestart){
-        confirmRestart=true;restart.textContent="I saved my work — restart";
+        confirmRestart=true;restart.dataset.confirm="true";restart.textContent="I saved my work — restart";
         status.textContent="Save all open projects, sales entries and print queues first. Restarting may close unsaved work. Protected Studios reopen through the PTG portal. Select Later to keep working.";
         return;
       }
