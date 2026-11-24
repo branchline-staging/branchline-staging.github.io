@@ -70,6 +70,7 @@ internal static class Tests
         }
         finally{Directory.Delete(folder,true);}
         TransactionTests.Run();
+        ReceiptTests.Run();
         return 0;
     }
 }
