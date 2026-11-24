@@ -50,3 +50,6 @@ $p=Start-Process -FilePath $output -Wait -PassThru
 Start-Sleep -Milliseconds 500
 if($p.ExitCode -ne 42 -or (Test-Path $marker)){throw 'Tampered helper ran or blocked workspace.'}
 Write-Output 'PASS integrated launch from original entry; verification skip; pinned helper bytes; tamper rejection; original main result preserved'
+
+# Expected nonzero negative test above must not leak into the successful workflow exit.
+exit 0
