@@ -97,6 +97,9 @@ for item in sorted(out.rglob("*")):
  if item.is_file() and item.suffix.lower() in allowed:
   release_hash.update(str(item.relative_to(out)).encode("utf-8")+b"\0")
   release_hash.update(hashlib.sha256(item.read_bytes()).digest())
+for name in ("check.js","check.css"):
+ release_hash.update(("staging/updates/"+name).encode("utf-8")+b"\0")
+ release_hash.update(hashlib.sha256((root/"staging"/"updates"/name).read_bytes()).digest())
 revision=release_hash.hexdigest()
 update_dir=out/"sales-tracker"/"updates"
 update_dir.mkdir(exist_ok=True)
