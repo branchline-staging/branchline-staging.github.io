@@ -10,9 +10,9 @@ try
     if(args.Length==3&&args[0]=="--inspect-integrated")
     {
         using var integrated=ModuleDefinition.ReadModule(args[1],new ReaderParameters{InMemory=true});
-        byte[] helper=integrated.Resources.OfType<EmbeddedResource>().Single(r=>r.Name==resourceName).GetResourceData();
-        RequireHelperKey(helper,File.ReadAllBytes(args[2]));
-        string embeddedDigest=Hash(helper);
+        byte[] inspectedHelper=integrated.Resources.OfType<EmbeddedResource>().Single(r=>r.Name==resourceName).GetResourceData();
+        RequireHelperKey(inspectedHelper,File.ReadAllBytes(args[2]));
+        string embeddedDigest=Hash(inspectedHelper);
         var hook=integrated.EntryPoint.DeclaringType.Methods.Single(m=>m.Name=="StartIntegratedUpdateCenter");
         if(!hook.Body.Instructions.Any(i=>i.OpCode==OpCodes.Ldstr&&(string)i.Operand==embeddedDigest))
             throw new Exception("Integrated helper hash stamp differs.");
