@@ -22,6 +22,26 @@ namespace Branchline.UpdateCenter
             return ReplaceVerified(found[0].Path,plan,RequireClosed,null);
         }
 
+        // The production companion verifies the current identity and signed receipt
+        // again immediately before applying, including future centrally signed builds.
+        internal static string ApplyCompanionUpdate(SignedUpdatePlan plan,NativeReleaseClient.Offer offer,
+            System.Security.Cryptography.RSAParameters key,string channel,Uri directory,bool userConfirmed)
+        {
+            if(!userConfirmed||plan==null||offer==null)
+                throw new InvalidOperationException("No approved update.");
+            RequireClosed();
+            var current=InstalledIdentity.Discover(key,channel,directory);
+            if(!String.Equals(current.Sha,plan.ExpectedBase,StringComparison.OrdinalIgnoreCase) ||
+                current.Sequence>=plan.Release.Sequence)
+                throw new InvalidOperationException("Installed version changed.");
+            var envelope=InstalledIdentity.MakeReceipt(offer);
+            var release=InstalledIdentity.VerifyReceipt(envelope,key,channel,directory,plan.Release.Sha256);
+            if(release.Sequence!=plan.Release.Sequence)
+                throw new InvalidOperationException("Receipt revision differs from verified package.");
+            return ReplaceVerified(current.Path,plan,RequireClosed,null,
+                ()=>InstalledIdentity.Persist(current.Path,envelope));
+        }
+
         private static void RequireClosed()
         {
             var processes=Process.GetProcessesByName("Branchline Workspace");
@@ -45,7 +65,7 @@ namespace Branchline.UpdateCenter
 
         // Internal test seam for an injected post-replacement failure. The future
         // production helper uses only ApplyClosedInstallation, with null hook.
-        internal static string ReplaceVerified(string target,SignedUpdatePlan plan,Action requireClosed,Action postReplaceTest)
+        internal static string ReplaceVerified(string target,SignedUpdatePlan plan,Action requireClosed,Action postReplaceTest,Action persistReceipt=null)
         {
             if(plan==null||requireClosed==null)throw new InvalidOperationException("Missing verified update.");
             RequirePlainPath(target);
@@ -79,6 +99,7 @@ namespace Branchline.UpdateCenter
                 if(!NativeReleasePolicy.VerifyPayload(target,plan.Release) ||
                     !String.Equals(LegacyInstallDetector.HashFile(backup),plan.ExpectedBase,StringComparison.OrdinalIgnoreCase))
                     throw new IOException("Post-install verification failed.");
+                if(persistReceipt!=null)persistReceipt();
                 return backup;
             }
             catch(Exception original)

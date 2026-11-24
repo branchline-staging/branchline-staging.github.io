@@ -15,7 +15,18 @@ jobs:
         shell: pwsh
         run: |
           $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-          & $csc /nologo /target:exe /platform:x64 /r:System.Web.Extensions.dll /out:NativeUpdateTests.exe staging\native\LegacyInstallDetector.cs staging\native\NativeReleasePolicy.cs staging\native\Tests.cs staging\native\NativeReleaseClient.cs staging\native\NativeUpdateTransaction.cs staging\native\TransactionTests.cs
+          & $csc /nologo /target:exe /platform:x64 /r:System.Web.Extensions.dll /out:NativeUpdateTests.exe staging\native\LegacyInstallDetector.cs staging\native\NativeReleasePolicy.cs staging\native\Tests.cs staging\native\NativeReleaseClient.cs staging\native\NativeUpdateTransaction.cs staging\native\TransactionTests.cs staging\native\InstalledIdentity.cs staging\native\ReceiptTests.cs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\NativeUpdateTests.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Compile companion with temporary CI public key (never publish)
+        shell: pwsh
+        run: |
+          $rsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider 2048
+          $rsa.PersistKeyInCsp = $false
+          $key = Join-Path $env:RUNNER_TEMP 'branchline-test-public.xml'
+          try { [IO.File]::WriteAllText($key,$rsa.ToXmlString($false)) } finally { $rsa.Dispose() }
+          $exe = & .\staging\native\build-companion.ps1 -PublicKeyFile $key -OutputDirectory (Join-Path $env:RUNNER_TEMP 'branchline-ci-only')
+          $p = Start-Process -FilePath $exe -ArgumentList '--self-test' -PassThru -Wait
+          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
