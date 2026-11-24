@@ -22,3 +22,9 @@
 5. Stage, test, and approve rollout before publishing production. Then distribute one-time compatible bootstrap and optional notifications across platforms. Device version reporting/administration is later in this same project, with privacy and role controls.
 
 Do not claim automatic update availability or production release until verified. Native policy tests do not install, and no live users are modified.
+
+## 2026-11-24 continuation after PR #4
+- All three PR #4 checks passed at 4b8c8a339c. Browser fixture: https://github.com/branchline-staging/branchline-staging.github.io/actions/runs/45308862764 (1280 and 390px). Windows: https://github.com/branchline-staging/branchline-staging.github.io/actions/runs/45308862661. Web build: https://github.com/branchline-staging/branchline-staging.github.io/actions/runs/45308862685.
+- PR #4 merged to **staging only**, commit 4fd654da5e4b6d64a3a591ede22f378ca0dc8f4f. Publication run https://github.com/branchline-staging/branchline-staging.github.io/actions/runs/45309087396 pending at creation of this branch; verify actual served manifest before marking live.
+- Recovered local R6 build script and follow-up ZIP. R6 candidate was a fixed-size resource/title patch of the R5 executable plus border hotfix, not a rebuild from complete C# sources. The exact R6 follow-up remains recovery baseline. Do not substitute older R2 source or assert the unresolved account role was fixed.
+- Active next branch: feature/native-update-transaction-20261124. Added bounded HTTPS client, signed in-memory plan and transactional replacement/backup/rollback core plus Windows fixture tests. No release signing key, downloadable release, launcher integration or helper executable yet; no production deployment. Test code uses only dummy files and temporary RSA keys.

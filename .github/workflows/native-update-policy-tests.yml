@@ -15,7 +15,7 @@ jobs:
         shell: pwsh
         run: |
           $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-          & $csc /nologo /target:exe /platform:x64 /r:System.Web.Extensions.dll /out:NativeUpdateTests.exe staging\native\LegacyInstallDetector.cs staging\native\NativeReleasePolicy.cs staging\native\Tests.cs
+          & $csc /nologo /target:exe /platform:x64 /r:System.Web.Extensions.dll /out:NativeUpdateTests.exe staging\native\LegacyInstallDetector.cs staging\native\NativeReleasePolicy.cs staging\native\Tests.cs staging\native\NativeReleaseClient.cs staging\native\NativeUpdateTransaction.cs staging\native\TransactionTests.cs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\NativeUpdateTests.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

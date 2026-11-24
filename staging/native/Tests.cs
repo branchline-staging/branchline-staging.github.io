@@ -69,6 +69,7 @@ internal static class Tests
             }
         }
         finally{Directory.Delete(folder,true);}
+        TransactionTests.Run();
         return 0;
     }
 }
