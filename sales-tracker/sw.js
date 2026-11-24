@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_NAME = "branchline-shell-v199";
+const CACHE_NAME = "branchline-shell-v200-r6-isolation";
 const APP_SHELL_URLS = [
   "./",
   "./index.html",
@@ -74,7 +74,7 @@ self.addEventListener("install", event => {
 self.addEventListener("activate", event => {
   event.waitUntil(
     caches.keys()
-      .then(keys => Promise.all(keys.filter(key => key.startsWith("branchline-") && key !== CACHE_NAME).map(key => caches.delete(key))))
+      .then(keys => Promise.all(keys.filter(key => key.startsWith("branchline-shell-") && key !== CACHE_NAME).map(key => caches.delete(key))))
       .then(() => self.clients.claim()),
   );
 });
@@ -115,10 +115,10 @@ self.addEventListener("fetch", event => {
         return response;
       })
       .catch(async () => {
-        const cached = await caches.match(request);
+        const cached = await (await caches.open(CACHE_NAME)).match(request);
         if (cached) return cached;
         if (request.mode === "navigate") {
-          const appShell = await caches.match(new URL("./index.html", self.registration.scope).href);
+          const appShell = await (await caches.open(CACHE_NAME)).match(new URL("./index.html", self.registration.scope).href);
           if (appShell) return appShell;
         }
         return new Response("", { status: 503, statusText: "Unavailable offline" });
