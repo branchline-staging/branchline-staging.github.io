@@ -3,6 +3,7 @@
 param(
  [Parameter(Mandatory=$true)][string]$PilotZip,
  [Parameter(Mandatory=$true)][string]$SignedCompanion,
+ [Parameter(Mandatory=$true)][string]$PublicKeyFile,
  [Parameter(Mandatory=$true)][string]$OutputDirectory,
  [Parameter(Mandatory=$true)][switch]$ConfirmRolePilotTested
 )
@@ -36,6 +37,6 @@ $template=Join-Path $out.FullName 'IntegratedHook.dll'
 & $csc /nologo /target:library "/out:$template" (Join-Path $PSScriptRoot 'IntegratedHook.cs')
 if($LASTEXITCODE -ne 0){throw 'Hook compilation failed.'}
 $launcher=Join-Path $out.FullName 'Branchline Workspace.exe'
-& dotnet run --project (Join-Path $PSScriptRoot 'patcher/BranchlinePatcher.csproj') --configuration Release -- $original (Resolve-Path -LiteralPath $SignedCompanion).Path $template $launcher
+& dotnet run --project (Join-Path $PSScriptRoot 'patcher/BranchlinePatcher.csproj') --configuration Release -- $original (Resolve-Path -LiteralPath $SignedCompanion).Path $template (Resolve-Path -LiteralPath $PublicKeyFile).Path $launcher
 if($LASTEXITCODE -ne 0){throw 'Exact R6 patch failed. Do not distribute.'}
 Write-Output "Candidate: $launcher — sign and test in the original installation before any release."

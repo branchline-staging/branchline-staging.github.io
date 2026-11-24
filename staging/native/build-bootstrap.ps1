@@ -27,6 +27,8 @@ $name="Branchline-Workspace-$($data.sequence).exe"
 if($data.payloadUrl -cne "https://kzamora19.github.io/first-megasaver-ptg/native-releases/$name"){throw 'Invalid native release destination.'}
 $payload=Join-Path $release $name
 if((Get-Item -LiteralPath $payload).Length -gt 64MB -or (Get-FileHash -LiteralPath $payload).Hash -ne $data.payloadSha256 -or (Get-AuthenticodeSignature -LiteralPath $payload).Status -ne 'Valid'){throw 'Signed launcher verification failed.'}
+& dotnet run --project (Join-Path $PSScriptRoot 'patcher/BranchlinePatcher.csproj') --configuration Release -- --inspect-integrated $payload $key
+if($LASTEXITCODE -ne 0){throw 'Launcher lacks the matching integrated update helper.'}
 if(Test-Path -LiteralPath $OutputDirectory){throw 'Use a new output directory.'}
 $out=New-Item -ItemType Directory -Path $OutputDirectory
 $exe=Join-Path $out.FullName 'Branchline Workspace Upgrade.exe'

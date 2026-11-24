@@ -7,16 +7,30 @@ const string resourceName="Branchline.IntegratedUpdater.exe";
 const string placeholder="BRANCHLINE_EMBEDDED_COMPANION_SHA256_PLACEHOLDER";
 try
 {
-    bool fixture=args.Length==5&&args[0]=="--fixture";
-    if(args.Length!=4&&!fixture)throw new Exception("Expected [--fixture] original.exe helper.exe template.dll output.exe");
+    if(args.Length==3&&args[0]=="--inspect-integrated")
+    {
+        using var integrated=ModuleDefinition.ReadModule(args[1],new ReaderParameters{InMemory=true});
+        byte[] helper=integrated.Resources.OfType<EmbeddedResource>().Single(r=>r.Name==resourceName).GetResourceData();
+        RequireHelperKey(helper,File.ReadAllBytes(args[2]));
+        string embeddedDigest=Hash(helper);
+        var hook=integrated.EntryPoint.DeclaringType.Methods.Single(m=>m.Name=="StartIntegratedUpdateCenter");
+        if(!hook.Body.Instructions.Any(i=>i.OpCode==OpCodes.Ldstr&&(string)i.Operand==embeddedDigest))
+            throw new Exception("Integrated helper hash stamp differs.");
+        Console.WriteLine("PASS integrated helper and pinned release identity");
+        return 0;
+    }
+    bool fixture=args.Length==6&&args[0]=="--fixture";
+    if(args.Length!=5&&!fixture)throw new Exception("Expected [--fixture] original.exe helper.exe template.dll public-key.xml output.exe");
     var input=Path.GetFullPath(args[fixture?1:0]);
     var helper=Path.GetFullPath(args[fixture?2:1]);
     var template=Path.GetFullPath(args[fixture?3:2]);
-    var output=Path.GetFullPath(args[fixture?4:3]);
+    var key=Path.GetFullPath(args[fixture?4:3]);
+    var output=Path.GetFullPath(args[fixture?5:4]);
     if(File.Exists(output)||String.Equals(input,output,StringComparison.OrdinalIgnoreCase))throw new Exception("Output must be a new file.");
     if(!fixture&&Hash(File.ReadAllBytes(input))!=exactPilot)throw new Exception("Expected exact R6 role correction pilot, not an older launcher.");
     byte[] helperBytes=File.ReadAllBytes(helper);
     if(helperBytes.Length==0||helperBytes.Length>8*1024*1024)throw new Exception("Invalid embedded helper size.");
+    RequireHelperKey(helperBytes,File.ReadAllBytes(key));
     string digest=Hash(helperBytes);
     using var module=ModuleDefinition.ReadModule(input,new ReaderParameters{InMemory=true});
     using var source=ModuleDefinition.ReadModule(template,new ReaderParameters{InMemory=true});
@@ -77,3 +91,11 @@ try
 }
 catch(Exception e){Console.Error.WriteLine(e);return 1;}
 static string Hash(byte[] bytes)=>Convert.ToHexString(SHA256.HashData(bytes));
+
+static void RequireHelperKey(byte[] helper,byte[] expected)
+{
+    if(expected.Length<1||expected.Length>16384)throw new Exception("Invalid public key file.");
+    using var module=ModuleDefinition.ReadModule(new MemoryStream(helper),new ReaderParameters{InMemory=true});
+    byte[] embedded=module.Resources.OfType<EmbeddedResource>().Single(r=>r.Name=="Branchline.ReleasePublicKey.xml").GetResourceData();
+    if(!CryptographicOperations.FixedTimeEquals(embedded,expected))throw new Exception("Embedded helper key differs from approved pinned release key.");
+}

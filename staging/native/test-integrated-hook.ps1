@@ -4,6 +4,10 @@ $csc=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $fixture=Join-Path $dir.FullName 'BranchlinePatchFixture.exe'
 $helper=Join-Path $dir.FullName 'FixtureHelper.exe'
 $template=Join-Path $dir.FullName 'IntegratedHook.dll'
+$key=Join-Path $dir.FullName 'fixture-public.xml'
+$wrong=Join-Path $dir.FullName 'wrong-public.xml'
+[IO.File]::WriteAllText($key,'fixture public identity')
+[IO.File]::WriteAllText($wrong,'different fixture public identity')
 $output=Join-Path $dir.FullName 'Branchline Workspace.exe'
 @'
 using System;
@@ -21,12 +25,16 @@ class FixtureHelper { static int Main(string[] args) {
 '@ | Set-Content (Join-Path $dir.FullName 'FixtureHelper.cs')
 & $csc /nologo /target:exe "/out:$fixture" (Join-Path $dir.FullName 'Fixture.cs')
 if($LASTEXITCODE -ne 0){throw 'Fixture compilation failed.'}
-& $csc /nologo /target:exe "/out:$helper" (Join-Path $dir.FullName 'FixtureHelper.cs')
+& $csc /nologo /target:exe "/out:$helper" "/resource:$key,Branchline.ReleasePublicKey.xml" (Join-Path $dir.FullName 'FixtureHelper.cs')
 if($LASTEXITCODE -ne 0){throw 'Helper compilation failed.'}
 & $csc /nologo /target:library "/out:$template" (Join-Path $PSScriptRoot 'IntegratedHook.cs')
 if($LASTEXITCODE -ne 0){throw 'Hook compilation failed.'}
-& dotnet run --project (Join-Path $PSScriptRoot 'patcher/BranchlinePatcher.csproj') --configuration Release -- --fixture $fixture $helper $template $output
+& dotnet run --project (Join-Path $PSScriptRoot 'patcher/BranchlinePatcher.csproj') --configuration Release -- --fixture $fixture $helper $template $key $output
 if($LASTEXITCODE -ne 0){throw 'Fixture integration failed.'}
+& dotnet run --project (Join-Path $PSScriptRoot 'patcher/BranchlinePatcher.csproj') --configuration Release -- --inspect-integrated $output $key
+if($LASTEXITCODE -ne 0){throw 'Integrated key validation failed.'}
+& dotnet run --project (Join-Path $PSScriptRoot 'patcher/BranchlinePatcher.csproj') --configuration Release -- --inspect-integrated $output $wrong
+if($LASTEXITCODE -eq 0){throw 'Mismatched release key accepted.'}
 $marker=Join-Path $dir.FullName 'helper-ran.txt'
 $p=Start-Process -FilePath $output -ArgumentList '--verify' -Wait -PassThru
 if($p.ExitCode -ne 42 -or (Test-Path $marker) -or @(Get-ChildItem $dir.FullName -Filter 'Branchline.UpdateCenter.*.exe').Count -ne 0){throw 'Verify mode launched the helper or entry result changed.'}
