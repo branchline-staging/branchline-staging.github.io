@@ -1,21 +1,29 @@
 "use strict";
 
-const CACHE_NAME = "branchline-shell-v200-r6-isolation";
+const CACHE_NAME = "branchline-shell-r6-consolidation-staging";
 const APP_SHELL_URLS = [
   "./",
   "./index.html",
   "./install.html",
   "./apps/",
   "./apps/index.html",
+  "./styles.css",
+  "./styles.css?v=unified-ui-20261123",
   "./apps/branchline-ui-stage.css",
   "./apps/branchline-outlined-drawer.css",
-  "./branchline-app-rail.css?v=ui-rail-20261123",
-  "./branchline-app-rail.js?v=ui-rail-20261123",
-  "./styles.css",
+  "./branchline-app-rail.css?v=r6-consolidation-pilot",
+  "./branchline-app-rail.js?v=r6-consolidation-pilot",
+  "./icons/official/branchline.png",
+  "./icons/r6/Approved.branchline.png",
+  "./icons/r6/Approved.ptg.png",
+  "./icons/r6/Approved.sales.png",
+  "./icons/r6/Approved.megaframe.png",
+  "./icons/r6/Approved.megaflyer.png",
+  "./icons/r6/FirstMegasaverHeader.png",
+  "./icons/official/four-apps.png",
   "./styles.css?v=ps-ranking-table-20261119",
   "./styles.css?v=apps-hub-20261119",
   "./styles.css?v=ps-assist-link-20261121",
-  "./styles.css?v=unified-ui-20261123",
   "./auth-app.js",
   "./ps-certificates.mjs",
   "./management-reports.mjs",
@@ -61,8 +69,6 @@ const APP_SHELL_URLS = [
   "./icons/maskable-192.png",
   "./icons/maskable-512.png",
   "./icons/apple-touch-icon.png",
-  "./icons/official/branchline.png",
-  "./icons/official/four-apps.png",
 ].map(path => new URL(path, self.registration.scope).href);
 const APP_SHELL = new Set(APP_SHELL_URLS);
 

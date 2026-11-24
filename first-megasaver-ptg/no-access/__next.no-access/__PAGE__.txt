@@ -1,0 +1,6 @@
+1:"$Sreact.fragment"
+2:I[22016,["/first-megasaver-ptg/_next/static/chunks/a2841a29e72c81d8.js","/first-megasaver-ptg/_next/static/chunks/e8168223bcb8c87f.js","/first-megasaver-ptg/_next/static/chunks/d20bb3775f795ca0.js"],""]
+3:I[97367,["/first-megasaver-ptg/_next/static/chunks/ff1a16fafef87110.js","/first-megasaver-ptg/_next/static/chunks/247eb132b7f7b574.js"],"OutletBoundary"]
+4:"$Sreact.suspense"
+0:{"buildId":"Aytp2hDC8Yhu37GGLHXXT","rsc":["$","$1","c",{"children":[["$","main",null,{"className":"shell","children":["$","section",null,{"className":"panel","children":[["$","p",null,{"className":"eyebrow","children":"FIRST MEGASAVER · ACCESS CONTROL"}],["$","h1",null,{"children":"Access not available"}],["$","p",null,{"className":"intro","children":"Your account does not have permission to access the Price Tag Generator. Please contact your Branch Admin or System Admin if you believe this is incorrect."}],["$","$L2",null,{"className":"admin-link","href":"/login","children":"Return to login →"}]]}]}],null,["$","$L3",null,{"children":["$","$4",null,{"name":"Next.MetadataOutlet","children":"$@5"}]}]]}],"loading":null,"isPartial":false}
+5:null

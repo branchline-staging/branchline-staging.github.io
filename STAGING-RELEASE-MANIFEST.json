@@ -1,14 +1,14 @@
 {
   "host": "branchline-staging.github.io",
   "supabase": "rlfdvmiqkbitetatxkju",
-  "files": 305,
+  "files": 376,
   "rootPreserved": true,
   "privateEditorsPublished": false,
   "sha256": {
-    "index.html": "3c13a01efa04f1dc28f79c34ee4acfe97885a014f4d6db885357beb3bbe963a3",
-    "sales-tracker/index.html": "f289d210f4e97c4dd2944c7082aa4fb1dc26073a7e25f3d9a4effa5b8b5ba852",
-    "first-megasaver-ptg/studios/index.html": "d025e2f905d5d5cb0b2b22eb2ea7ca2300a558e74da34cbd01b7185fd0aef738",
-    "megaframe-studio/studio/index.html": "57c29093445e3a3affdc8dd680f6eafb4e7cde4e65c075a4b98cc0e55f523d1e",
-    "flyer-studio/studio/index.html": "1a31ce2ef380c4515d41647fab5cff7a4ae3291ae9b6abbde8a999d5d1ff892d"
+    "index.html": "00c418db4d5af5a61bc5047c32b76e0808642ff6b5c67b6a1cd29deb4c0068cf",
+    "sales-tracker/index.html": "977eb108e78e87f9349d7728294178304bc293362533003cbfe6bfd47bcde921",
+    "first-megasaver-ptg/studios/index.html": "3878322967ab98271ce425c1311bf5599c7770bb69878e4c061cf3aa4faf57e5",
+    "megaframe-studio/studio/index.html": "640e7318c370d338d039432a40fe5b2f6690856c1ad88351c0939bd140cf8840",
+    "flyer-studio/studio/index.html": "513991bbd5abbe49b6511f8dfdbaa4dea6c148ba63d930bebab96a691433f893"
   }
 }
