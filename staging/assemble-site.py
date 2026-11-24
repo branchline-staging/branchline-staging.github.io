@@ -141,7 +141,7 @@ for app in ("sales-tracker","first-megasaver-ptg","megaframe-studio","flyer-stud
   if "</head>" not in body or "</body>" not in body:continue
   # Do not insert update UI into the offline notice, login or OAuth callbacks.
   if re.search(r"(^|/)(login|offline|oauth|callback|auth)([/. -]|$)",str(page.relative_to(out)),re.I):continue
-  injection='<link rel="stylesheet" href="/sales-tracker/updates/check.css"><script defer src="/sales-tracker/updates/check.js" data-revision="'+revision+'"></script>'
+  injection='<link rel="stylesheet" href="/sales-tracker/updates/check.css"><script defer src="/sales-tracker/updates/check.js" data-revision="'+revision+'" data-release-label="Navigation R6 staging (web)"></script>'
   assert "data-revision="+chr(34)+revision not in body
   page.write_text(body.replace("</head>",injection+"</head>",1))
 
