@@ -1,6 +1,8 @@
 import os, pathlib, shutil, hashlib, json, re
 from pathlib import Path
 root=Path(__file__).resolve().parents[1]
+import subprocess
+subprocess.run(["node","--test",str(root/"staging/tests/update-center.test.cjs")],check=True)
 parent=root.parent
 out=root/"staging-site-dist"
 stage="rlfdvmiqkbitetatxkju"
@@ -86,6 +88,34 @@ for app,legacy in (("megaframe-studio","vmyoxoiygfcecgkbavgg"),("flyer-studio","
   page=p.read_text()
   assert 'src="./launch.js"' in page
   p.write_text(page.replace('src="./launch.js"','src="./launch.js?v=isolated-photo-v2"',1))
+
+# Web release notifications: same-origin staging-only manifest, never native installer.
+# Hash the assembled web assets before injecting the notification script, so a
+# page identifies its own release independently from the latest manifest.
+release_hash=hashlib.sha256()
+for item in sorted(out.rglob("*")):
+ if item.is_file() and item.suffix.lower() in allowed:
+  release_hash.update(str(item.relative_to(out)).encode("utf-8")+b"\0")
+  release_hash.update(hashlib.sha256(item.read_bytes()).digest())
+for name in ("check.js","check.css"):
+ release_hash.update(("staging/updates/"+name).encode("utf-8")+b"\0")
+ release_hash.update(hashlib.sha256((root/"staging"/"updates"/name).read_bytes()).digest())
+revision=release_hash.hexdigest()
+update_dir=out/"sales-tracker"/"updates"
+update_dir.mkdir(exist_ok=True)
+for name in ("check.js","check.css"):
+ shutil.copy2(root/"staging"/"updates"/name,update_dir/name)
+(update_dir/"release.json").write_text(json.dumps({"schema":1,"channel":"staging","webRevision":revision},indent=2))
+for app in ("sales-tracker","first-megasaver-ptg","megaframe-studio","flyer-studio"):
+ for page in (out/app).rglob("*.html"):
+  body=page.read_text()
+  if "</head>" not in body or "</body>" not in body:continue
+  # Do not insert update UI into the offline notice, login or OAuth callbacks.
+  if re.search(r"(^|/)(login|offline|oauth|callback|auth)([/. -]|$)",str(page.relative_to(out)),re.I):continue
+  injection='<link rel="stylesheet" href="/sales-tracker/updates/check.css"><script defer src="/sales-tracker/updates/check.js" data-revision="'+revision+'"></script>'
+  assert "data-revision="+chr(34)+revision not in body
+  page.write_text(body.replace("</head>",injection+"</head>",1))
+
 forbidden=["psoopubvdpwztzkdyifa","agknxlowackphvwyvxge","vmyoxoiygfcecgkbavgg","tzklsscoiwnmeantcefw","https://kzamora19.github.io","https://first-megasaver-ptg.vercel.app"]
 n=0
 for p in out.rglob("*"):
