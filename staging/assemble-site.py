@@ -89,6 +89,35 @@ for app,legacy in (("megaframe-studio","vmyoxoiygfcecgkbavgg"),("flyer-studio","
   assert 'src="./launch.js"' in page
   p.write_text(page.replace('src="./launch.js"','src="./launch.js?v=isolated-photo-v2"',1))
 
+# R6 single-installation directive: do not change existing manifest identities
+# until the actual installed browser identities have been inventoried.
+# Cache Storage is origin-wide, not scoped automatically by service workers.
+ptg_worker=out/"first-megasaver-ptg/sw.js"
+ptg_text=ptg_worker.read_text()
+old='keys.filter((key) => key !== CACHE_NAME)'
+assert old in ptg_text,"PTG cache cleanup changed; review before release"
+ptg_text=ptg_text.replace(old,'keys.filter((key) => key.startsWith("first-megasaver-ptg-shell-") && key !== CACHE_NAME)')
+ptg_text,n_ptg=re.subn(r'const CACHE_NAME = "first-megasaver-ptg-shell-v[^"]+";', 'const CACHE_NAME = "first-megasaver-ptg-shell-v3-r6-isolation";',ptg_text,count=1)
+assert n_ptg==1
+# Claim only after the app's own cache cleanup has completed.
+ptg_text=ptg_text.replace('Promise.all(keys.filter((key) => key.startsWith("first-megasaver-ptg-shell-") && key !== CACHE_NAME).map((key) => caches.delete(key)))\n    )\n  );\n  self.clients.claim();','Promise.all(keys.filter((key) => key.startsWith("first-megasaver-ptg-shell-") && key !== CACHE_NAME).map((key) => caches.delete(key)))\n    ).then(() => self.clients.claim())\n  );')
+assert '.then(() => self.clients.claim())' in ptg_text
+ptg_worker.write_text(ptg_text)
+sales_worker=out/"sales-tracker/sw.js"
+sales_text=sales_worker.read_text()
+assert 'key.startsWith("branchline-")' in sales_text
+sales_text=sales_text.replace('key.startsWith("branchline-")','key.startsWith("branchline-shell-")')
+assert 'await caches.match(request)' in sales_text and 'await caches.match(new URL("./index.html", self.registration.scope).href)' in sales_text
+sales_text=sales_text.replace('await caches.match(request)','await (await caches.open(CACHE_NAME)).match(request)').replace('await caches.match(new URL("./index.html", self.registration.scope).href)','await (await caches.open(CACHE_NAME)).match(new URL("./index.html", self.registration.scope).href)')
+sales_text,n_sales=re.subn(r'const CACHE_NAME = "branchline-shell-v[^"]+";', 'const CACHE_NAME = "branchline-shell-v200-r6-isolation";',sales_text,count=1)
+assert n_sales==1
+sales_worker.write_text(sales_text)
+# The old staging build copied an unsigned Windows archive from PTG public/.
+# Remove the known legacy installer rather than offering a parallel install.
+legacy_zip=out/"first-megasaver-ptg/branchline-workspace-windows.zip"
+if legacy_zip.exists():legacy_zip.unlink()
+subprocess.run(["node",str(root/"staging/tests/cache-isolation.test.cjs"),str(out)],check=True)
+
 # Web release notifications: same-origin staging-only manifest, never native installer.
 # Hash the assembled web assets before injecting the notification script, so a
 # page identifies its own release independently from the latest manifest.
