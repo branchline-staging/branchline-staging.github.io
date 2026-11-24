@@ -37,3 +37,7 @@ jobs:
       - name: Test in-place managed startup integration on harmless fixture
         shell: pwsh
         run: .\staging\native\test-integrated-hook.ps1
+
+      - name: Test one-time signed-package bootstrap with inert payload
+        shell: pwsh
+        run: .\staging\native\test-bootstrap.ps1

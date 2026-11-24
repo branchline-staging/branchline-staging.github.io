@@ -73,7 +73,7 @@ namespace Branchline.UpdateCenter
         private int ownerPid;
         private readonly System.Windows.Forms.Timer ownerTimer=new System.Windows.Forms.Timer();
         private readonly Label status=new Label();
-        private readonly Button check=new Button(), install=new Button(), open=new Button();
+        private readonly Button check=new Button(), install=new Button(), open=new Button(), later=new Button();
         private readonly System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer();
         private InstalledIdentity current;
         private NativeReleaseClient.Offer offer;
@@ -96,11 +96,13 @@ namespace Branchline.UpdateCenter
             check.Text="Check for updates";check.AutoSize=true;
             install.Text="Update & Restart";install.AutoSize=true;install.Enabled=false;
             open.Text="Open workspace";open.AutoSize=true;open.Enabled=false;
-            foreach(var button in new[]{check,install,open}){button.ForeColor=Color.FromArgb(16,40,71);button.BackColor=Color.White;buttons.Controls.Add(button);}
+            later.Text="Later";later.AutoSize=true;
+            foreach(var button in watch?new[]{install,later,check}:new[]{check,install,open}){button.ForeColor=Color.FromArgb(16,40,71);button.BackColor=Color.White;buttons.Controls.Add(button);}
             panel.Controls.Add(buttons,0,2);Controls.Add(panel);
             check.Click+=async (s,e)=>await Check(true);
             install.Click+=async (s,e)=>await Install();
             open.Click+=(s,e)=>OpenWorkspace();
+            later.Click+=(s,e)=>{if(!busy&&watch)Hide();};
             timer.Interval=15*60*1000;timer.Tick+=async (s,e)=>await Check(false);
             Shown+=async (s,e)=>{
                 if(watch){Hide();ownerTimer.Start();}
@@ -141,7 +143,7 @@ namespace Branchline.UpdateCenter
 
         private void SetBusy(bool value)
         {
-            busy=value;check.Enabled=!value;open.Enabled=!value&&current!=null;
+            busy=value;check.Enabled=!value;later.Enabled=!value;open.Enabled=!value&&current!=null;
             install.Enabled=!value&&offer!=null;
         }
         private async Task Check(bool manual)
