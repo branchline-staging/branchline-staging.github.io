@@ -11,11 +11,11 @@ try {
  for(const viewport of [{width:1280,height:800},{width:390,height:844}]){
   const context=await browser.newContext({viewport,serviceWorkers:"block"});
   let manifest={schema:1,channel:"staging",webRevision:revision};
-  let fail=false, calls=0, navigations=0;
+  let fail=false, calls=0, navigations=0, entryRevision=revision;
   await context.route("**/*",async route=>{
     const url=new URL(route.request().url());
     assert.equal(url.origin,origin,"No cross-origin requests");
-    if(url.pathname==="/fixture/")return route.fulfill({contentType:"text/html",body:'<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/sales-tracker/updates/check.css"><textarea aria-label="Unsaved draft"></textarea><script defer src="/sales-tracker/updates/check.js" data-revision="'+revision+'"></script>'});
+    if(url.pathname==="/sales-tracker/")return route.fulfill({contentType:"text/html",body:'<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/sales-tracker/updates/check.css"><textarea aria-label="Unsaved draft"></textarea><script defer src="/sales-tracker/updates/check.js" data-revision="'+entryRevision+'" data-release-label="Navigation R6 staging (web)"></script>'});
     if(url.pathname.endsWith("/check.js"))return route.fulfill({contentType:"application/javascript",body:script});
     if(url.pathname.endsWith("/check.css"))return route.fulfill({contentType:"text/css",body:css});
     if(url.pathname.endsWith("/release.json")){
@@ -28,11 +28,14 @@ try {
   const page=await context.newPage(), errors=[];
   page.on("pageerror",error=>errors.push(error.message));
   page.on("framenavigated",frame=>{if(frame===page.mainFrame())navigations++;});
-  await page.goto(origin+"/fixture/");
+  await page.goto(origin+"/sales-tracker/");
   const panel=page.locator("#bl-release-check"), status=panel.getByRole("status",{includeHidden:true});
   const check=panel.getByRole("button",{name:"Check for updates"});
-  const dismiss=panel.getByRole("button",{name:"Remind me later"});
+  const dismiss=panel.getByRole("button",{name:"Later"});
+  const restart=panel.locator("#bl-release-restart");
+  const confirmed=panel.locator("#bl-release-restart[data-confirm=true]");
   await panel.waitFor();
+  assert.match(await panel.locator(".bl-release-version").textContent(),/Navigation R6 staging/);
   await page.waitForFunction(()=>!document.querySelector("#bl-release-check button").disabled);
   assert.ok(calls>=1,"Automatic check on load");
   assert.equal(await status.isVisible(),false,"No update prompt when current");
@@ -40,10 +43,18 @@ try {
   manifest.webRevision=next;
   await check.click();
   await status.waitFor({state:"visible"});
-  assert.match(await status.textContent(),/Update available/);
+  assert.match(await status.textContent(),/Update Available/);
   assert.equal(await dismiss.isVisible(),true);
   assert.equal(await page.getByRole("textbox").inputValue(),"Do not lose my unsaved draft");
   assert.equal(navigations,1,"No automatic refresh");
+  await restart.click();
+  assert.match(await status.textContent(),/Save all open projects/);
+  assert.equal(navigations,1,"First click is warning only");
+  assert.equal(await restart.getAttribute("data-confirm"),"true");
+  await confirmed.click();
+  await page.waitForFunction(()=>!document.querySelector("#bl-release-check button").disabled);
+  assert.match(await status.textContent(),/not ready/,"Stale entry rejected");
+  assert.equal(await page.getByRole("textbox").inputValue(),"Do not lose my unsaved draft");
   const bounds=await panel.boundingBox();
   assert.ok(bounds.x>=0&&bounds.x+bounds.width<=viewport.width+1,"Fits viewport");
   await dismiss.click();
@@ -56,7 +67,7 @@ try {
   manifest.webRevision=third;
   await page.evaluate(()=>window.dispatchEvent(new Event("online")));
   await status.waitFor({state:"visible"});
-  assert.match(await status.textContent(),/Update available/);
+  assert.match(await status.textContent(),/Update Available/);
   await dismiss.click();
   fail=true;
   await check.click();
@@ -68,8 +79,17 @@ try {
   await page.waitForFunction(()=>!document.querySelector("#bl-release-check button").disabled);
   assert.match(await status.textContent(),/Could not check/);
   assert.equal(navigations,1);
+  // The only actual restart follows explicit save confirmation and a matching
+  // new entry stamp. It does not create a new installation or use a remote URL.
+  manifest={schema:1,channel:"staging",webRevision:third};entryRevision=third;
+  await check.click();await restart.waitFor({state:"visible"});
+  await restart.click();
+  await Promise.all([page.waitForNavigation(),confirmed.click()]);
+  await page.locator("#bl-release-check").waitFor();
+  assert.equal(navigations,2,"One explicitly approved restart");
+  assert.match(await page.locator(".bl-release-version").textContent(),/cccccccc/);
   assert.deepEqual(errors,[]);
-  console.log("PASS",viewport.width,"startup, update, dismiss, new revision, offline, wrong channel, unsaved draft and no reload");
+  console.log("PASS",viewport.width,"startup, update, dismiss, new revision, offline, wrong channel, unsaved draft, stale shell guard, explicit restart");
   await context.close();
  }
 }finally{await browser.close();}
